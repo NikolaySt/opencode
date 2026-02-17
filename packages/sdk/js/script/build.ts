@@ -1,14 +1,22 @@
 #!/usr/bin/env bun
 
-const dir = new URL("..", import.meta.url).pathname
-process.chdir(dir)
-
 import { $ } from "bun"
+import fs from "fs/promises"
 import path from "path"
 
 import { createClient } from "@hey-api/openapi-ts"
 
-await $`bun dev generate > ${dir}/openapi.json`.cwd(path.resolve(dir, "../../opencode"))
+const dir = path.resolve(import.meta.dirname, "..")
+process.chdir(dir)
+
+const openapi = path.join(dir, "openapi.json")
+const dist = path.join(dir, "dist")
+const opencode = path.resolve(dir, "../../opencode")
+
+// remove stale dist before running generate to avoid import errors
+await fs.rm(dist, { recursive: true, force: true })
+
+await $`bun dev generate > ${openapi}`.cwd(opencode)
 
 await createClient({
   input: "./openapi.json",
@@ -39,6 +47,5 @@ await createClient({
 
 await $`bun prettier --write src/gen`
 await $`bun prettier --write src/v2`
-await $`rm -rf dist`
 await $`bun tsc`
-await $`rm openapi.json`
+await fs.rm(openapi, { force: true })
