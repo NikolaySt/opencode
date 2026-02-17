@@ -1881,6 +1881,40 @@ export type Config = {
      */
     mcp_timeout?: number
   }
+  /**
+   * Plugin system configuration
+   */
+  plugins?: {
+    load?: {
+      /**
+       * Additional plugin paths to load
+       */
+      paths?: Array<string>
+    }
+    /**
+     * Exclusive slot assignments, e.g. { memory: 'memory-lancedb' }
+     */
+    slots?: {
+      [key: string]: string
+    }
+    /**
+     * Per-plugin configuration
+     */
+    entries?: {
+      [key: string]: {
+        /**
+         * Enable/disable this plugin
+         */
+        enabled?: boolean
+        /**
+         * Plugin-specific configuration
+         */
+        config?: {
+          [key: string]: unknown
+        }
+      }
+    }
+  }
 }
 
 export type BadRequestError = {
@@ -2196,7 +2230,7 @@ export type Command = {
   description?: string
   agent?: string
   model?: string
-  source?: "command" | "mcp" | "skill"
+  source?: "command" | "mcp" | "skill" | "plugin"
   template: string
   subtask?: boolean
   hints: Array<string>
@@ -2236,6 +2270,18 @@ export type FormatterStatus = {
   extensions: Array<string>
   enabled: boolean
 }
+
+export type RpcCallResult = {
+  ok: boolean
+  result?: unknown
+  error?: string
+}
+
+export type RpcMethodList = Array<{
+  name: string
+  pluginId: string
+  description?: string
+}>
 
 export type GlobalHealthData = {
   body?: never
@@ -5056,3 +5102,53 @@ export type EventSubscribeResponses = {
 }
 
 export type EventSubscribeResponse = EventSubscribeResponses[keyof EventSubscribeResponses]
+
+export type RpcCallData = {
+  body?: {
+    params?: unknown
+    sessionID?: string
+  }
+  path: {
+    method: string
+  }
+  query?: {
+    directory?: string
+  }
+  url: "/rpc/{method}"
+}
+
+export type RpcCallErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+}
+
+export type RpcCallError = RpcCallErrors[keyof RpcCallErrors]
+
+export type RpcCallResponses = {
+  /**
+   * RPC result
+   */
+  200: RpcCallResult
+}
+
+export type RpcCallResponse = RpcCallResponses[keyof RpcCallResponses]
+
+export type RpcListData = {
+  body?: never
+  path?: never
+  query?: {
+    directory?: string
+  }
+  url: "/rpc"
+}
+
+export type RpcListResponses = {
+  /**
+   * List of RPC methods
+   */
+  200: RpcMethodList
+}
+
+export type RpcListResponse = RpcListResponses[keyof RpcListResponses]

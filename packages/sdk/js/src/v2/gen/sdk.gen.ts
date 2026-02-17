@@ -97,6 +97,9 @@ import type {
   QuestionRejectResponses,
   QuestionReplyErrors,
   QuestionReplyResponses,
+  RpcCallErrors,
+  RpcCallResponses,
+  RpcListResponses,
   SessionAbortErrors,
   SessionAbortResponses,
   SessionChildrenErrors,
@@ -3183,6 +3186,66 @@ export class Event extends HeyApiClient {
   }
 }
 
+export class Rpc extends HeyApiClient {
+  /**
+   * Call plugin RPC method
+   *
+   * Invoke a plugin-registered RPC method by its qualified name.
+   */
+  public call<ThrowOnError extends boolean = false>(
+    parameters: {
+      method: string
+      directory?: string
+      params?: unknown
+      sessionID?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "method" },
+            { in: "query", key: "directory" },
+            { in: "body", key: "params" },
+            { in: "body", key: "sessionID" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<RpcCallResponses, RpcCallErrors, ThrowOnError>({
+      url: "/rpc/{method}",
+      ...options,
+      ...params,
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+        ...params.headers,
+      },
+    })
+  }
+
+  /**
+   * List plugin RPC methods
+   *
+   * List all registered plugin RPC methods.
+   */
+  public list<ThrowOnError extends boolean = false>(
+    parameters?: {
+      directory?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams([parameters], [{ args: [{ in: "query", key: "directory" }] }])
+    return (options?.client ?? this.client).get<RpcListResponses, unknown, ThrowOnError>({
+      url: "/rpc",
+      ...options,
+      ...params,
+    })
+  }
+}
+
 export class OpencodeClient extends HeyApiClient {
   public static readonly __registry = new HeyApiRegistry<OpencodeClient>()
 
@@ -3314,5 +3377,10 @@ export class OpencodeClient extends HeyApiClient {
   private _event?: Event
   get event(): Event {
     return (this._event ??= new Event({ client: this.client }))
+  }
+
+  private _rpc?: Rpc
+  get rpc(): Rpc {
+    return (this._rpc ??= new Rpc({ client: this.client }))
   }
 }
