@@ -24,6 +24,7 @@ import { PermissionNext } from "@/permission/next"
 import { Global } from "@/global"
 import type { LanguageModelV2Usage } from "@ai-sdk/provider"
 import { iife } from "@/util/iife"
+import { Plugin } from "@/plugin"
 
 export namespace Session {
   const log = Log.create({ service: "session" })
@@ -231,6 +232,9 @@ export namespace Session {
     Bus.publish(Event.Created, {
       info: result,
     })
+    Plugin.getHookRunner()
+      .then((runner) => runner.runSessionCreated({ sessionID: result.id }))
+      .catch(() => {})
     const cfg = await Config.get()
     if (!result.parentID && (Flag.OPENCODE_AUTO_SHARE || cfg.share === "auto"))
       share(result.id)

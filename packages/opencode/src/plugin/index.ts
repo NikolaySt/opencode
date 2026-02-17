@@ -12,6 +12,12 @@ import { Session } from "../session"
 import { NamedError } from "@opencode-ai/util/error"
 import { CopilotAuthPlugin } from "./copilot"
 import { gitlabAuthPlugin as GitlabAuthPlugin } from "@gitlab/opencode-gitlab-auth"
+import { discover } from "./discovery"
+import { createPluginRegistry, createPluginRecord, type PluginRegistry, type PluginApi } from "./registry"
+import { createHookRunner, type HookRunner } from "./hooks"
+import { validatePluginConfig } from "./validation"
+import { resolveSlotDecision } from "./slots"
+import * as ChatCommand from "../command/chat-command"
 
 export namespace Plugin {
   const log = Log.create({ service: "plugin" })
@@ -20,6 +26,47 @@ export namespace Plugin {
 
   // Built-in plugins that are directly imported (not installed from npm)
   const INTERNAL_PLUGINS: PluginInstance[] = [CodexAuthPlugin, CopilotAuthPlugin, GitlabAuthPlugin]
+
+  // ============================================================================
+  // New plugin module resolution
+  // ============================================================================
+
+  type PluginModuleExport = {
+    definition?: {
+      id?: string
+      name?: string
+      description?: string
+      version?: string
+      kind?: string
+      register?: (api: PluginApi) => void | Promise<void>
+      activate?: (api: PluginApi) => void | Promise<void>
+    }
+    register?: (api: PluginApi) => void | Promise<void>
+  }
+
+  function resolvePluginExport(mod: unknown): PluginModuleExport {
+    const resolved =
+      mod && typeof mod === "object" && "default" in (mod as Record<string, unknown>)
+        ? (mod as { default: unknown }).default
+        : mod
+    // Bare function export — treated as a register() function.
+    // Legacy plugins (function returning Hooks) won't reach here because
+    // they're loaded by the legacy loader above, and discovered modules
+    // without register/activate are skipped at the call site.
+    if (typeof resolved === "function") {
+      return { register: resolved as PluginModuleExport["register"] }
+    }
+    if (resolved && typeof resolved === "object") {
+      const def = resolved as NonNullable<PluginModuleExport["definition"]>
+      const register = def.register ?? def.activate
+      return { definition: def, register }
+    }
+    return {}
+  }
+
+  // ============================================================================
+  // State
+  // ============================================================================
 
   const state = Instance.state(async () => {
     const client = createOpencodeClient({
@@ -38,6 +85,8 @@ export namespace Plugin {
       serverUrl: Server.url(),
       $: Bun.$,
     }
+
+    // ----- Legacy plugin loading (backward compat) -----
 
     for (const plugin of INTERNAL_PLUGINS) {
       log.info("loading internal plugin", { name: plugin.name })
@@ -92,11 +141,212 @@ export namespace Plugin {
       }
     }
 
+    // ----- New-style plugin loading (discovery + registry) -----
+
+    const directories = await Config.directories()
+    const pluginsConfig = config.plugins
+    const registryFactory = createPluginRegistry()
+
+    const discoveryResult = discover({
+      workspaceDir: Instance.directory,
+      extraPaths: pluginsConfig?.load?.paths,
+      configDirectories: directories,
+    })
+
+    for (const diag of discoveryResult.diagnostics) {
+      registryFactory.pushDiagnostic(diag)
+    }
+
+    const seenIds = new Map<string, string>()
+    const memorySlot = pluginsConfig?.slots?.memory
+    let selectedMemoryId: string | null = null
+
+    for (const candidate of discoveryResult.candidates) {
+      const pluginId = candidate.idHint
+
+      // Deduplicate — first origin wins
+      const existing = seenIds.get(pluginId)
+      if (existing) {
+        const record = createPluginRecord({
+          id: pluginId,
+          name: candidate.packageName ?? pluginId,
+          description: candidate.packageDescription,
+          version: candidate.packageVersion,
+          source: candidate.source,
+          origin: candidate.origin,
+          workspaceDir: candidate.workspaceDir,
+          enabled: false,
+          configSchema: false,
+        })
+        record.status = "disabled"
+        record.error = `overridden by ${existing} plugin`
+        registryFactory.registry.plugins.push(record)
+        continue
+      }
+
+      // Check per-plugin enabled/disabled
+      const entry = pluginsConfig?.entries?.[pluginId]
+      const enabled = entry?.enabled !== false
+
+      const record = createPluginRecord({
+        id: pluginId,
+        name: candidate.packageName ?? pluginId,
+        description: candidate.packageDescription,
+        version: candidate.packageVersion,
+        source: candidate.source,
+        origin: candidate.origin,
+        workspaceDir: candidate.workspaceDir,
+        enabled,
+        configSchema: false,
+      })
+
+      if (!enabled) {
+        record.status = "disabled"
+        record.error = "disabled by config"
+        registryFactory.registry.plugins.push(record)
+        seenIds.set(pluginId, candidate.origin)
+        continue
+      }
+
+      // Load the module
+      let mod: unknown
+      try {
+        mod = await import(candidate.source)
+      } catch (err) {
+        log.error("failed to load new-style plugin", { id: pluginId, source: candidate.source, error: String(err) })
+        record.status = "error"
+        record.error = String(err)
+        registryFactory.registry.plugins.push(record)
+        seenIds.set(pluginId, candidate.origin)
+        registryFactory.pushDiagnostic({
+          level: "error",
+          pluginId,
+          source: candidate.source,
+          message: `failed to load plugin: ${String(err)}`,
+        })
+        continue
+      }
+
+      const resolved = resolvePluginExport(mod)
+      const definition = resolved.definition
+      const register = resolved.register
+
+      // If this module doesn't have a register/activate export, it may be
+      // a legacy-style plugin (function returning Hooks). Skip it from the
+      // new registry — it would have been picked up by the legacy loader
+      // if it was in config.plugin paths.
+      if (typeof register !== "function") {
+        log.info("skipping plugin without register export", { id: pluginId, source: candidate.source })
+        seenIds.set(pluginId, candidate.origin)
+        continue
+      }
+
+      // Merge definition metadata
+      if (definition?.name) record.name = definition.name
+      if (definition?.description) record.description = definition.description
+      if (definition?.version) record.version = definition.version
+
+      // Memory slot resolution
+      const slotDecision = resolveSlotDecision({
+        id: pluginId,
+        kind: definition?.kind,
+        slot: memorySlot,
+        selectedId: selectedMemoryId,
+      })
+
+      if (!slotDecision.enabled) {
+        record.enabled = false
+        record.status = "disabled"
+        record.error = slotDecision.reason
+        registryFactory.registry.plugins.push(record)
+        seenIds.set(pluginId, candidate.origin)
+        continue
+      }
+
+      if (slotDecision.selected && definition?.kind === "memory") {
+        selectedMemoryId = pluginId
+      }
+
+      // Validate plugin config
+      const validated = validatePluginConfig({
+        value: entry?.config,
+      })
+
+      if (!validated.ok) {
+        log.error("invalid plugin config", { id: pluginId, errors: validated.errors })
+        record.status = "error"
+        record.error = `invalid config: ${validated.errors.join(", ")}`
+        registryFactory.registry.plugins.push(record)
+        seenIds.set(pluginId, candidate.origin)
+        registryFactory.pushDiagnostic({
+          level: "error",
+          pluginId,
+          source: candidate.source,
+          message: record.error,
+        })
+        continue
+      }
+
+      // Create API and call register
+      const api = registryFactory.createApi(record, {
+        config,
+        pluginConfig: validated.value,
+      })
+
+      try {
+        const result = register(api)
+        if (result && typeof (result as Promise<void>).then === "function") {
+          await (result as Promise<void>)
+        }
+        registryFactory.registry.plugins.push(record)
+        seenIds.set(pluginId, candidate.origin)
+        log.info("loaded new-style plugin", { id: pluginId, tools: record.toolNames.length, hooks: record.hookCount })
+      } catch (err) {
+        log.error("plugin register failed", { id: pluginId, source: candidate.source, error: String(err) })
+        record.status = "error"
+        record.error = String(err)
+        registryFactory.registry.plugins.push(record)
+        seenIds.set(pluginId, candidate.origin)
+        registryFactory.pushDiagnostic({
+          level: "error",
+          pluginId,
+          source: candidate.source,
+          message: `plugin failed during register: ${String(err)}`,
+        })
+      }
+    }
+
+    // Register chat commands from the registry into the ChatCommand module
+    ChatCommand.clear()
+    for (const reg of registryFactory.registry.chatCommands) {
+      ChatCommand.register(reg.pluginId, reg.command)
+    }
+
+    // Create hook runner for new-style hooks
+    const runner = createHookRunner(registryFactory.registry)
+
+    if (registryFactory.registry.diagnostics.length > 0) {
+      log.info("plugin diagnostics", { count: registryFactory.registry.diagnostics.length })
+      for (const diag of registryFactory.registry.diagnostics) {
+        if (diag.level === "error") {
+          log.error(diag.message, { pluginId: diag.pluginId, source: diag.source })
+        } else {
+          log.warn(diag.message, { pluginId: diag.pluginId, source: diag.source })
+        }
+      }
+    }
+
     return {
       hooks,
       input,
+      registry: registryFactory.registry,
+      runner,
     }
   })
+
+  // ============================================================================
+  // Legacy API (backward compatible)
+  // ============================================================================
 
   export async function trigger<
     Name extends Exclude<keyof Required<Hooks>, "auth" | "event" | "tool">,
@@ -134,5 +384,19 @@ export namespace Plugin {
         })
       }
     })
+  }
+
+  // ============================================================================
+  // New API (registry + hook runner)
+  // ============================================================================
+
+  /** Get the plugin registry (new-style plugins only) */
+  export async function getRegistry(): Promise<PluginRegistry> {
+    return state().then((x) => x.registry)
+  }
+
+  /** Get the typed hook runner (new-style plugins only) */
+  export async function getHookRunner(): Promise<HookRunner> {
+    return state().then((x) => x.runner)
   }
 }

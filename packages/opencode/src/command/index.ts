@@ -7,6 +7,7 @@ import PROMPT_INITIALIZE from "./template/initialize.txt"
 import PROMPT_REVIEW from "./template/review.txt"
 import { MCP } from "../mcp"
 import { Skill } from "../skill"
+import * as ChatCommand from "./chat-command"
 
 export namespace Command {
   export const Event = {
@@ -27,7 +28,7 @@ export namespace Command {
       description: z.string().optional(),
       agent: z.string().optional(),
       model: z.string().optional(),
-      source: z.enum(["command", "mcp", "skill"]).optional(),
+      source: z.enum(["command", "mcp", "skill", "plugin"]).optional(),
       // workaround for zod not supporting async functions natively so we use getters
       // https://zod.dev/v4/changelog?id=zfunction
       template: z.promise(z.string()).or(z.string()),
@@ -133,6 +134,18 @@ export namespace Command {
         get template() {
           return skill.content
         },
+        hints: [],
+      }
+    }
+
+    // Add plugin chat commands (these bypass the LLM and run handlers directly)
+    for (const cmd of ChatCommand.list()) {
+      if (result[cmd.name]) continue
+      result[cmd.name] = {
+        name: cmd.name,
+        description: cmd.description,
+        source: "plugin",
+        template: "",
         hints: [],
       }
     }

@@ -40,6 +40,15 @@ import { QuestionRoutes } from "./routes/question"
 import { PermissionRoutes } from "./routes/permission"
 import { GlobalRoutes } from "./routes/global"
 import { MDNS } from "./mdns"
+import { Plugin } from "../plugin"
+import { startPluginServices, type PluginServicesHandle } from "../plugin/services"
+import { startChannels, type ChannelHandle, type ChannelMessage, type ChannelResponse } from "../plugin/channel"
+import { startCronScheduler, type CronHandle } from "../plugin/cron"
+
+import { resolveRoute } from "../plugin/router"
+import { Session } from "../session"
+import { SessionPrompt } from "../session/prompt"
+import { Config } from "../config/config"
 
 // @ts-ignore This global is needed to prevent ai-sdk from logging warnings to stdout https://github.com/vercel/ai/blob/2dc67e0ef538307f21368db32d5a12345d98831b/packages/ai/src/logger/log-warnings.ts#L85
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -538,6 +547,125 @@ export namespace Server {
             })
           },
         )
+        .post(
+          "/rpc/:method",
+          describeRoute({
+            summary: "Call plugin RPC method",
+            description: "Invoke a plugin-registered RPC method by its qualified name.",
+            operationId: "rpc.call",
+            responses: {
+              200: {
+                description: "RPC result",
+                content: {
+                  "application/json": {
+                    schema: resolver(
+                      z
+                        .object({
+                          ok: z.boolean(),
+                          result: z.unknown().optional(),
+                          error: z.string().optional(),
+                        })
+                        .meta({ ref: "RpcCallResult" }),
+                    ),
+                  },
+                },
+              },
+              ...errors(400),
+            },
+          }),
+          validator(
+            "param",
+            z.object({
+              method: z.string(),
+            }),
+          ),
+          validator(
+            "json",
+            z.object({
+              params: z.unknown().optional(),
+              sessionID: z.string().optional(),
+            }),
+          ),
+          async (c) => {
+            const method = c.req.valid("param").method
+            const body = c.req.valid("json")
+            const registry = await Plugin.getRegistry().catch(() => null)
+            if (!registry) {
+              return c.json({ ok: false, error: "plugin system not initialized" })
+            }
+            const dispatcher = registry.rpcDispatcher()
+            const config = await Config.get()
+            const result = await dispatcher.call(method, body.params, {
+              sessionID: body.sessionID,
+              config,
+            })
+            return c.json(result)
+          },
+        )
+        .get(
+          "/rpc",
+          describeRoute({
+            summary: "List plugin RPC methods",
+            description: "List all registered plugin RPC methods.",
+            operationId: "rpc.list",
+            responses: {
+              200: {
+                description: "List of RPC methods",
+                content: {
+                  "application/json": {
+                    schema: resolver(
+                      z
+                        .array(
+                          z.object({
+                            name: z.string(),
+                            pluginId: z.string(),
+                            description: z.string().optional(),
+                          }),
+                        )
+                        .meta({ ref: "RpcMethodList" }),
+                    ),
+                  },
+                },
+              },
+            },
+          }),
+          async (c) => {
+            const registry = await Plugin.getRegistry().catch(() => null)
+            if (!registry) return c.json([])
+            const dispatcher = registry.rpcDispatcher()
+            return c.json(dispatcher.list())
+          },
+        )
+        .all("/plugins/*", async (c, next) => {
+          // Route to plugin HTTP handlers registered via registerHttpRoute/registerHttpHandler
+          const registry = await Plugin.getRegistry().catch(() => null)
+          if (!registry) return next()
+
+          // Check registered routes first (exact path match)
+          for (const route of registry.httpRoutes) {
+            if (c.req.path === route.path) {
+              try {
+                return await route.handler(c.req.raw)
+              } catch (err) {
+                log.error("plugin http route error", { path: route.path, plugin: route.pluginId, error: String(err) })
+                return c.json({ error: "Plugin handler error" }, { status: 500 })
+              }
+            }
+          }
+
+          // Check generic plugin HTTP handlers
+          for (const handler of registry.httpHandlers) {
+            try {
+              const response = await handler.handler(c.req.raw)
+              if (response) return response
+            } catch (err) {
+              log.error("plugin http handler error", { plugin: handler.pluginId, error: String(err) })
+              return c.json({ error: "Plugin handler error" }, { status: 500 })
+            }
+          }
+
+          return next()
+        })
         .all("/*", async (c) => {
           const path = c.req.path
 
@@ -569,6 +697,65 @@ export namespace Server {
       },
     })
     return result
+  }
+
+  /**
+   * Session key → sessionID map for channel conversations.
+   * Each unique channel+source combination gets its own session.
+   */
+  const channelSessions = new Map<string, string>()
+
+  /**
+   * Bridge function that delivers inbound channel messages to OpenCode sessions.
+   * Uses the agent router (L4) to resolve which agent handles the message,
+   * creates or reuses a session, and returns the assistant's response.
+   */
+  async function channelDeliver(msg: ChannelMessage): Promise<ChannelResponse> {
+    // Wrap in Instance.provide() because channel adapters invoke deliver()
+    // from their own lifecycle (outside HTTP middleware), and most session/
+    // agent APIs require Instance context.
+    return Instance.provide({
+      directory: process.cwd(),
+      init: InstanceBootstrap,
+      async fn() {
+        const registry = await Plugin.getRegistry()
+        const defaultAgent = await Agent.defaultAgent()
+        const route = resolveRoute(registry.routes, msg, defaultAgent)
+
+        log.info("channel deliver", {
+          channel: msg.channel,
+          source: msg.source.id,
+          agent: route.agent,
+          matchedBy: route.matchedBy,
+        })
+
+        // Get or create a session for this channel+source combination
+        let sessionID = channelSessions.get(route.sessionKey)
+        if (!sessionID) {
+          const title = `channel:${msg.channel}:${msg.source.name ?? msg.source.id}`
+          const created = await Session.create({ title })
+          sessionID = created.id
+          channelSessions.set(route.sessionKey, sessionID)
+        }
+
+        const result = await SessionPrompt.prompt({
+          sessionID,
+          agent: route.agent,
+          parts: [{ type: "text", text: msg.content }],
+        })
+
+        // Extract text from response parts
+        const text = result.parts
+          .filter((p) => p.type === "text")
+          .map((p) => ("text" in p ? (p as any).text : ""))
+          .join("\n")
+
+        return {
+          content: text || "(no response)",
+          replyTo: msg.threadID,
+        }
+      },
+    })
   }
 
   export function listen(opts: {
@@ -610,8 +797,81 @@ export namespace Server {
       log.warn("mDNS enabled but hostname is loopback; skipping mDNS publish")
     }
 
+    // Fire typed server.start hook and start plugin services, channels, and cron.
+    // Wrapped in Instance.provide() because these detached promise chains run
+    // outside the per-request middleware, so Instance context must be established
+    // explicitly for Plugin.getRegistry() / Plugin.getHookRunner() to work.
+    const pluginStartup = Instance.provide({
+      directory: process.cwd(),
+      init: InstanceBootstrap,
+      fn: async () => {
+        const [registry, runner, config] = await Promise.all([
+          Plugin.getRegistry(),
+          Plugin.getHookRunner(),
+          Config.get(),
+        ])
+
+        runner.runServerStart({ port: server.port }).catch(() => {})
+
+        const services = await startPluginServices({ registry, config }).catch((err) => {
+          log.error("failed to start plugin services", { error: String(err) })
+          return undefined
+        })
+
+        let channels: ChannelHandle | undefined
+        if (registry.channels.length > 0) {
+          try {
+            const handle = startChannels({
+              channels: registry.channels,
+              config,
+              deliver: channelDeliver,
+            })
+            await handle.ready
+            channels = handle
+          } catch (err) {
+            log.error("failed to start channels", { error: String(err) })
+          }
+        }
+
+        let cron: CronHandle | undefined
+        if (registry.cronJobs.length > 0) {
+          try {
+            cron = startCronScheduler({
+              jobs: registry.cronJobs,
+              config,
+              publish: (pluginId, topic, payload) => registry.bus.publish(pluginId, topic, payload),
+            })
+          } catch (err) {
+            log.error("failed to start cron scheduler", { error: String(err) })
+          }
+        }
+
+        return { services, channels, cron }
+      },
+    }).catch((err) => {
+      log.error("failed to initialize plugin subsystems", { error: String(err) })
+      return undefined as { services?: PluginServicesHandle; channels?: ChannelHandle; cron?: CronHandle } | undefined
+    })
+
     const originalStop = server.stop.bind(server)
     server.stop = async (closeActiveConnections?: boolean) => {
+      // Wait for plugin subsystems to finish starting, then stop them
+      const result = await pluginStartup
+      if (result) {
+        if (result.cron) await result.cron.stop()
+        if (result.channels) await result.channels.stop().catch(() => {})
+        if (result.services) await result.services.stop().catch(() => {})
+      }
+      // Fire typed server.stop hook
+      await Instance.provide({
+        directory: process.cwd(),
+        init: InstanceBootstrap,
+        fn: async () => {
+          await Plugin.getHookRunner()
+            .then((runner) => runner.runServerStop({ port: server.port }))
+            .catch(() => {})
+        },
+      }).catch(() => {})
       if (shouldPublishMDNS) MDNS.unpublish()
       return originalStop(closeActiveConnections)
     }

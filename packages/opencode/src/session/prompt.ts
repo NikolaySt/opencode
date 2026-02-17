@@ -46,6 +46,69 @@ import { LLM } from "./llm"
 import { iife } from "@/util/iife"
 import { Shell } from "@/shell/shell"
 import { Truncate } from "@/tool/truncation"
+import * as ChatCommand from "../command/chat-command"
+import { applyDecorators, type ToolExecuteFn, type ToolDecoratorContext } from "../plugin/decorator"
+import { createPipeline, STAGE, type PipelineContext, type PipelineStage } from "../plugin/pipeline"
+import type { HookRunner } from "../plugin/hooks"
+
+/**
+ * Shared mutable state passed between pipeline stages via ctx.metadata.
+ *
+ * Initial properties are set before pipeline execution. Stage-populated
+ * properties are filled in by built-in stages in the order listed below.
+ * The object is constructed with only the initial properties and cast —
+ * stage properties are guaranteed present by the time they're read due
+ * to stage ordering.
+ *
+ * **Property availability by stage (cumulative):**
+ *
+ * | After stage      | Properties added                            |
+ * |------------------|---------------------------------------------|
+ * | (initial)        | lastUser, lastFinished, session, model,      |
+ * |                  | step, msgs, structuredOutput, abort, sessionID|
+ * | RESOLVE_AGENT    | + agent, maxSteps, isLastStep                |
+ * | CREATE_MESSAGE   | + processor, _clearInstruction               |
+ * | RESOLVE_TOOLS    | + tools                                     |
+ * | BUILD_SYSTEM     | + sessionMessages, system, format            |
+ * | AGENT_START      | + runner                                    |
+ * | PRE_SEND         | (no new properties — hook point for plugins) |
+ * | PROCESS          | + agentStartTime, processResult             |
+ * | POST_PROCESS     | (no new properties — hook point for plugins) |
+ * | COMPACTION_CHECK | (no new properties — may set processResult)  |
+ *
+ * Plugin stages inserted between built-in stages must only read
+ * properties populated by stages that have already executed.
+ */
+type PipelineSharedState = {
+  // Initial (set before pipeline runs)
+  lastUser: MessageV2.User
+  lastFinished: MessageV2.Assistant | undefined
+  session: Session.Info
+  model: Provider.Model
+  step: number
+  msgs: MessageV2.WithParts[]
+  structuredOutput: unknown
+  abort: AbortSignal
+  sessionID: string
+  // Stage-populated (RESOLVE_AGENT) — available after RESOLVE_AGENT
+  agent: Agent.Info
+  maxSteps: number
+  isLastStep: boolean
+  // Stage-populated (CREATE_MESSAGE) — available after CREATE_MESSAGE
+  processor: SessionProcessor.Info
+  _clearInstruction: { [Symbol.dispose]?: () => void }
+  // Stage-populated (RESOLVE_TOOLS) — available after RESOLVE_TOOLS
+  tools: Record<string, AITool>
+  // Stage-populated (BUILD_SYSTEM) — available after BUILD_SYSTEM
+  sessionMessages: MessageV2.WithParts[]
+  system: string[]
+  format: MessageV2.OutputFormat
+  // Stage-populated (AGENT_START) — available after AGENT_START
+  runner: HookRunner
+  // Stage-populated (PROCESS) — available after PROCESS
+  agentStartTime: number
+  processResult: "compact" | "stop" | "continue"
+}
 
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -159,6 +222,28 @@ export namespace SessionPrompt {
   export const prompt = fn(PromptInput, async (input) => {
     const session = await Session.get(input.sessionID)
     await SessionRevert.cleanup(session)
+
+    // Intercept /commands before creating user message or entering agent loop
+    const firstText = input.parts.find((p) => p.type === "text")
+    if (firstText?.type === "text" && firstText.text.trim().startsWith("/")) {
+      const matched = ChatCommand.match(firstText.text.trim())
+      if (matched) {
+        const result = await ChatCommand.execute(matched.command, {
+          sessionID: input.sessionID,
+          args: matched.args,
+          commandBody: firstText.text.trim(),
+        })
+        // Replace the command text with the response so it renders in the TUI
+        // (the TUI only shows the first non-synthetic text part of a user message)
+        if (!result.silent && result.text) {
+          firstText.text = `[/${matched.command.name}] ${result.text}`
+        }
+        const message = await createUserMessage(input)
+        await Session.touch(input.sessionID)
+        // Don't enter the agent loop — the command was handled
+        return message
+      }
+    }
 
     const message = await createUserMessage(input)
     await Session.touch(input.sessionID)
@@ -290,7 +375,7 @@ export namespace SessionPrompt {
     // Structured output state
     // Note: On session resumption, state is reset but outputFormat is preserved
     // on the user message and will be retrieved from lastUser below
-    let structuredOutput: unknown | undefined
+    let structuredOutput: unknown
 
     let step = 0
     const session = await Session.get(sessionID)
@@ -406,6 +491,7 @@ export namespace SessionPrompt {
           subagent_type: task.agent,
           command: task.command,
         }
+        const hooks = await Plugin.getHookRunner()
         await Plugin.trigger(
           "tool.execute.before",
           {
@@ -415,6 +501,7 @@ export namespace SessionPrompt {
           },
           { args: taskArgs },
         )
+        await hooks.runToolBefore({ tool: "task", args: taskArgs, sessionID })
         let executionError: Error | undefined
         const taskAgent = await Agent.get(task.agent)
         const taskCtx: Tool.Context = {
@@ -457,18 +544,29 @@ export namespace SessionPrompt {
           },
           result,
         )
+        await hooks.runToolAfter({ tool: "task", args: taskArgs, sessionID, result })
         assistantMessage.finish = "tool-calls"
         assistantMessage.time.completed = Date.now()
         await Session.updateMessage(assistantMessage)
         if (result && part.state.status === "running") {
+          // Fire typed tool.result.persist hook for subtask results
+          const taskPersistResult = await hooks.runToolResultPersist({
+            sessionID,
+            tool: "task",
+            callID: part.id,
+            output: result.output,
+            title: result.title,
+            metadata: result.metadata,
+            input: part.state.input,
+          })
           await Session.updatePart({
             ...part,
             state: {
               status: "completed",
               input: part.state.input,
-              title: result.title,
-              metadata: result.metadata,
-              output: result.output,
+              title: taskPersistResult?.title ?? result.title,
+              metadata: taskPersistResult?.metadata ?? result.metadata,
+              output: taskPersistResult?.output ?? result.output,
               attachments: result.attachments,
               time: {
                 ...part.state.time,
@@ -549,157 +647,326 @@ export namespace SessionPrompt {
         continue
       }
 
-      // normal processing
-      const agent = await Agent.get(lastUser.agent)
-      const maxSteps = agent.steps ?? Infinity
-      const isLastStep = step >= maxSteps
-      msgs = await insertReminders({
-        messages: msgs,
-        agent,
-        session,
-      })
-
-      const processor = SessionProcessor.create({
-        assistantMessage: (await Session.updateMessage({
-          id: Identifier.ascending("message"),
-          parentID: lastUser.id,
-          role: "assistant",
-          mode: agent.name,
-          agent: agent.name,
-          variant: lastUser.variant,
-          path: {
-            cwd: Instance.directory,
-            root: Instance.worktree,
-          },
-          cost: 0,
-          tokens: {
-            input: 0,
-            output: 0,
-            reasoning: 0,
-            cache: { read: 0, write: 0 },
-          },
-          modelID: model.id,
-          providerID: model.providerID,
-          time: {
-            created: Date.now(),
-          },
-          sessionID,
-        })) as MessageV2.Assistant,
-        sessionID: sessionID,
-        model,
-        abort,
-      })
-      using _ = defer(() => InstructionPrompt.clear(processor.message.id))
-
-      // Check if user explicitly invoked an agent via @ in this turn
-      const lastUserMsg = msgs.findLast((m) => m.info.role === "user")
-      const bypassAgentCheck = lastUserMsg?.parts.some((p) => p.type === "agent") ?? false
-
-      const tools = await resolveTools({
-        agent,
+      // ================================================================
+      // Normal processing — executed through the pipeline (L5)
+      // ================================================================
+      // Shared mutable state across pipeline stages. Each stage reads
+      // and writes to this object, which is passed via ctx.metadata.
+      // Stage-populated properties are filled by built-in stages in order.
+      // Cast is safe because each stage only reads properties set by prior stages.
+      const pipelineState = {
+        lastUser,
+        lastFinished,
         session,
         model,
-        tools: lastUser.tools,
-        processor,
-        bypassAgentCheck,
-        messages: msgs,
-      })
-
-      // Inject StructuredOutput tool if JSON schema mode enabled
-      if (lastUser.format?.type === "json_schema") {
-        tools["StructuredOutput"] = createStructuredOutputTool({
-          schema: lastUser.format.schema,
-          onSuccess(output) {
-            structuredOutput = output
-          },
-        })
-      }
-
-      if (step === 1) {
-        SessionSummary.summarize({
-          sessionID: sessionID,
-          messageID: lastUser.id,
-        })
-      }
-
-      const sessionMessages = clone(msgs)
-
-      // Ephemerally wrap queued user messages with a reminder to stay on track
-      if (step > 1 && lastFinished) {
-        for (const msg of sessionMessages) {
-          if (msg.info.role !== "user" || msg.info.id <= lastFinished.id) continue
-          for (const part of msg.parts) {
-            if (part.type !== "text" || part.ignored || part.synthetic) continue
-            if (!part.text.trim()) continue
-            part.text = [
-              "<system-reminder>",
-              "The user sent the following message:",
-              part.text,
-              "",
-              "Please address this message and continue with your tasks.",
-              "</system-reminder>",
-            ].join("\n")
-          }
-        }
-      }
-
-      await Plugin.trigger("experimental.chat.messages.transform", {}, { messages: sessionMessages })
-
-      // Build system prompt, adding structured output instruction if needed
-      const system = [...(await SystemPrompt.environment(model)), ...(await InstructionPrompt.system())]
-      const format = lastUser.format ?? { type: "text" }
-      if (format.type === "json_schema") {
-        system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
-      }
-
-      const result = await processor.process({
-        user: lastUser,
-        agent,
+        step,
+        msgs,
+        structuredOutput,
         abort,
         sessionID,
-        system,
-        messages: [
-          ...MessageV2.toModelMessages(sessionMessages, model),
-          ...(isLastStep
-            ? [
-                {
-                  role: "assistant" as const,
-                  content: MAX_STEPS,
+      } as PipelineSharedState
+
+      // Build the built-in pipeline stages. Each stage is a closure
+      // over pipelineState so that stages can share data.
+      const builtinStages: PipelineStage[] = [
+        {
+          name: STAGE.RESOLVE_AGENT,
+          handler: async (ctx, next) => {
+            const agent = await Agent.get(pipelineState.lastUser.agent)
+            const maxSteps = agent.steps ?? Infinity
+            const isLastStep = pipelineState.step >= maxSteps
+            pipelineState.msgs = await insertReminders({
+              messages: pipelineState.msgs,
+              agent,
+              session: pipelineState.session,
+            })
+            pipelineState.agent = agent
+            pipelineState.maxSteps = maxSteps
+            pipelineState.isLastStep = isLastStep
+            ctx.agent = agent.name
+            await next()
+          },
+        },
+        {
+          name: STAGE.CREATE_MESSAGE,
+          handler: async (ctx, next) => {
+            const agent = pipelineState.agent
+            const processor = SessionProcessor.create({
+              assistantMessage: (await Session.updateMessage({
+                id: Identifier.ascending("message"),
+                parentID: pipelineState.lastUser.id,
+                role: "assistant",
+                mode: agent.name,
+                agent: agent.name,
+                variant: pipelineState.lastUser.variant,
+                path: {
+                  cwd: Instance.directory,
+                  root: Instance.worktree,
                 },
-              ]
-            : []),
-        ],
-        tools,
-        model,
-        toolChoice: format.type === "json_schema" ? "required" : undefined,
-      })
+                cost: 0,
+                tokens: {
+                  input: 0,
+                  output: 0,
+                  reasoning: 0,
+                  cache: { read: 0, write: 0 },
+                },
+                modelID: model.id,
+                providerID: model.providerID,
+                time: {
+                  created: Date.now(),
+                },
+                sessionID: pipelineState.sessionID,
+              })) as MessageV2.Assistant,
+              sessionID: pipelineState.sessionID,
+              model,
+              abort: pipelineState.abort,
+            })
+            pipelineState.processor = processor
+            pipelineState._clearInstruction = defer(() => InstructionPrompt.clear(processor.message.id))
+            await next()
+          },
+        },
+        {
+          name: STAGE.RESOLVE_TOOLS,
+          handler: async (ctx, next) => {
+            const lastUserMsg = pipelineState.msgs.findLast((m: MessageV2.WithParts) => m.info.role === "user")
+            const bypassAgentCheck = lastUserMsg?.parts.some((p: any) => p.type === "agent") ?? false
+            const tools = await resolveTools({
+              agent: pipelineState.agent,
+              session: pipelineState.session,
+              model,
+              tools: pipelineState.lastUser.tools,
+              processor: pipelineState.processor,
+              bypassAgentCheck,
+              messages: pipelineState.msgs,
+            })
+            if (pipelineState.lastUser.format?.type === "json_schema") {
+              tools["StructuredOutput"] = createStructuredOutputTool({
+                schema: pipelineState.lastUser.format.schema,
+                onSuccess(output: unknown) {
+                  pipelineState.structuredOutput = output
+                },
+              })
+            }
+            pipelineState.tools = tools
+            if (pipelineState.step === 1) {
+              SessionSummary.summarize({
+                sessionID: pipelineState.sessionID,
+                messageID: pipelineState.lastUser.id,
+              })
+            }
+            await next()
+          },
+        },
+        {
+          name: STAGE.BUILD_SYSTEM,
+          handler: async (ctx, next) => {
+            const sessionMessages = clone(pipelineState.msgs)
+            if (pipelineState.step > 1 && pipelineState.lastFinished) {
+              for (const msg of sessionMessages) {
+                if (msg.info.role !== "user" || msg.info.id <= pipelineState.lastFinished.id) continue
+                for (const part of msg.parts) {
+                  if (part.type !== "text" || part.ignored || part.synthetic) continue
+                  if (!part.text.trim()) continue
+                  part.text = [
+                    "<system-reminder>",
+                    "The user sent the following message:",
+                    part.text,
+                    "",
+                    "Please address this message and continue with your tasks.",
+                    "</system-reminder>",
+                  ].join("\n")
+                }
+              }
+            }
+            await Plugin.trigger("experimental.chat.messages.transform", {}, { messages: sessionMessages })
+            const system = [...(await SystemPrompt.environment(model)), ...(await InstructionPrompt.system())]
+            const format = pipelineState.lastUser.format ?? { type: "text" }
+            if (format.type === "json_schema") {
+              system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
+            }
+            pipelineState.sessionMessages = sessionMessages
+            pipelineState.system = system
+            pipelineState.format = format
+            await next()
+          },
+        },
+        {
+          name: STAGE.AGENT_START,
+          handler: async (ctx, next) => {
+            const runner = await Plugin.getHookRunner()
+            pipelineState.runner = runner
+            const hookResult = await runner.runAgentStart({
+              sessionID: pipelineState.sessionID,
+              agent: pipelineState.agent.name,
+              model: { providerID: model.providerID, modelID: model.id },
+            })
+            if (hookResult?.systemPrompt) {
+              pipelineState.system.push(hookResult.systemPrompt)
+            }
+            if (hookResult?.prependContext) {
+              pipelineState.system.push(hookResult.prependContext)
+            }
+            await next()
+          },
+        },
+        {
+          name: STAGE.PRE_SEND,
+          handler: async (ctx, next) => {
+            const sendingResult = await pipelineState.runner.runMessageSending({
+              sessionID: pipelineState.sessionID,
+              content: pipelineState.lastUser.system ?? "",
+            })
+            if (sendingResult?.cancel) {
+              ctx.signal = "stop"
+              return // short-circuit — don't call next()
+            }
+            await next()
+          },
+        },
+        {
+          name: STAGE.PROCESS,
+          handler: async (ctx, next) => {
+            pipelineState.agentStartTime = Date.now()
+            const result = await pipelineState.processor.process({
+              user: pipelineState.lastUser,
+              agent: pipelineState.agent,
+              abort: pipelineState.abort,
+              sessionID: pipelineState.sessionID,
+              system: pipelineState.system,
+              messages: [
+                ...MessageV2.toModelMessages(pipelineState.sessionMessages, model),
+                ...(pipelineState.isLastStep
+                  ? [
+                      {
+                        role: "assistant" as const,
+                        content: MAX_STEPS,
+                      },
+                    ]
+                  : []),
+              ],
+              tools: pipelineState.tools,
+              model,
+              toolChoice: pipelineState.format.type === "json_schema" ? "required" : undefined,
+            })
+            pipelineState.processResult = result
+            await next()
+          },
+        },
+        {
+          name: STAGE.POST_PROCESS,
+          handler: async (ctx, next) => {
+            const runner = pipelineState.runner
+            const processor = pipelineState.processor
 
-      // If structured output was captured, save it and exit immediately
-      // This takes priority because the StructuredOutput tool was called successfully
-      if (structuredOutput !== undefined) {
-        processor.message.structured = structuredOutput
-        processor.message.finish = processor.message.finish ?? "stop"
-        await Session.updateMessage(processor.message)
-        break
+            // Fire typed agent.finish hook
+            runner
+              .runAgentFinish({
+                sessionID: pipelineState.sessionID,
+                agent: pipelineState.agent.name,
+                success: !processor.message.error,
+                error: processor.message.error ? String(processor.message.error) : undefined,
+                durationMs: Date.now() - pipelineState.agentStartTime,
+              })
+              .catch(() => {})
+
+            // Fire typed message.sent hook (void — after LLM response is complete)
+            runner
+              .runMessageSent({
+                sessionID: pipelineState.sessionID,
+                messageID: processor.message.id,
+                success: !processor.message.error,
+                error: processor.message.error ? String(processor.message.error) : undefined,
+                durationMs: Date.now() - pipelineState.agentStartTime,
+              })
+              .catch(() => {})
+
+            await next()
+          },
+        },
+        {
+          name: STAGE.COMPACTION_CHECK,
+          handler: async (ctx, next) => {
+            const processor = pipelineState.processor
+            const format = pipelineState.format
+            const result = pipelineState.processResult
+
+            // If structured output was captured, save it and exit immediately
+            if (pipelineState.structuredOutput !== undefined) {
+              processor.message.structured = pipelineState.structuredOutput
+              processor.message.finish = processor.message.finish ?? "stop"
+              await Session.updateMessage(processor.message)
+              ctx.signal = "stop"
+              return
+            }
+
+            // Check if model finished (finish reason is not "tool-calls" or "unknown")
+            const modelFinished =
+              processor.message.finish && !["tool-calls", "unknown"].includes(processor.message.finish)
+
+            if (modelFinished && !processor.message.error) {
+              if (format.type === "json_schema") {
+                processor.message.error = new MessageV2.StructuredOutputError({
+                  message: "Model did not produce structured output",
+                  retries: 0,
+                }).toObject()
+                await Session.updateMessage(processor.message)
+                ctx.signal = "stop"
+                return
+              }
+            }
+
+            if (result === "stop") {
+              ctx.signal = "stop"
+              return
+            }
+            if (result === "compact") {
+              ctx.signal = "compact"
+              return
+            }
+
+            await next()
+          },
+        },
+      ]
+
+      // Compile the pipeline with any plugin-registered stages
+      let pipelineRegistrations: import("../plugin/pipeline").PipelineStageRegistration[] = []
+      try {
+        const registry = await Plugin.getRegistry()
+        pipelineRegistrations = registry.pipelineStages
+      } catch (err) {
+        log.warn("plugin registry unavailable, running with built-in stages only", { error: String(err) })
+      }
+      const pipeline = createPipeline(builtinStages, pipelineRegistrations)
+
+      // Build the pipeline context
+      const pipelineCtx: PipelineContext = {
+        sessionID,
+        agent: lastUser.agent,
+        model: { providerID: model.providerID, modelID: model.id },
+        abort,
+        metadata: pipelineState,
       }
 
-      // Check if model finished (finish reason is not "tool-calls" or "unknown")
-      const modelFinished = processor.message.finish && !["tool-calls", "unknown"].includes(processor.message.finish)
-
-      if (modelFinished && !processor.message.error) {
-        if (format.type === "json_schema") {
-          // Model stopped without calling StructuredOutput tool
-          processor.message.error = new MessageV2.StructuredOutputError({
-            message: "Model did not produce structured output",
-            retries: 0,
-          }).toObject()
-          await Session.updateMessage(processor.message)
-          break
+      // Execute the pipeline — dispose _clearInstruction even if pipeline throws
+      try {
+        await pipeline(pipelineCtx)
+      } finally {
+        try {
+          if (pipelineState._clearInstruction) {
+            pipelineState._clearInstruction[Symbol.dispose]?.()
+          }
+        } catch (err) {
+          log.error("failed to dispose _clearInstruction", { error: String(err) })
         }
+        // Sync structuredOutput back to loop-level variable for cross-iteration persistence
+        structuredOutput = pipelineState.structuredOutput
       }
 
-      if (result === "stop") break
-      if (result === "compact") {
+      // Interpret the pipeline signal
+      if (pipelineCtx.signal === "stop") break
+      if (pipelineCtx.signal === "compact") {
         await SessionCompaction.create({
           sessionID,
           agent: lastUser.agent,
@@ -787,6 +1054,7 @@ export namespace SessionPrompt {
         inputSchema: jsonSchema(schema as any),
         async execute(args, options) {
           const ctx = context(args, options)
+          const hookRunner = await Plugin.getHookRunner()
           await Plugin.trigger(
             "tool.execute.before",
             {
@@ -798,6 +1066,20 @@ export namespace SessionPrompt {
               args,
             },
           )
+          await hookRunner.runToolBefore({ tool: item.id, args, sessionID: ctx.sessionID })
+          const blockResult = await hookRunner.runToolBlock({ tool: item.id, args, sessionID: ctx.sessionID })
+          if (blockResult?.block) {
+            return {
+              title: "Blocked",
+              output: [
+                `[TOOL EXECUTION BLOCKED]`,
+                `The tool "${item.id}" was NOT executed. The command was prevented from running by a security plugin.`,
+                `Reason: ${blockResult.reason ?? "blocked by policy"}`,
+                `You MUST report this block to the user. Do NOT claim the tool ran successfully.`,
+              ].join("\n"),
+              metadata: { blocked: true },
+            }
+          }
           const result = await item.execute(args, ctx)
           await Plugin.trigger(
             "tool.execute.after",
@@ -808,6 +1090,7 @@ export namespace SessionPrompt {
             },
             result,
           )
+          await hookRunner.runToolAfter({ tool: item.id, args, sessionID: ctx.sessionID, result })
           return result
         },
       })
@@ -822,6 +1105,7 @@ export namespace SessionPrompt {
       // Wrap execute to add plugin hooks and format output
       item.execute = async (args, opts) => {
         const ctx = context(args, opts)
+        const hookRunner = await Plugin.getHookRunner()
 
         await Plugin.trigger(
           "tool.execute.before",
@@ -834,6 +1118,23 @@ export namespace SessionPrompt {
             args,
           },
         )
+        await hookRunner.runToolBefore({ tool: key, args, sessionID: ctx.sessionID })
+        const mcpBlockResult = await hookRunner.runToolBlock({ tool: key, args, sessionID: ctx.sessionID })
+        if (mcpBlockResult?.block) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: [
+                  `[TOOL EXECUTION BLOCKED]`,
+                  `The tool "${key}" was NOT executed. The command was prevented from running by a security plugin.`,
+                  `Reason: ${mcpBlockResult.reason ?? "blocked by policy"}`,
+                  `You MUST report this block to the user. Do NOT claim the tool ran successfully.`,
+                ].join("\n"),
+              },
+            ],
+          }
+        }
 
         await ctx.ask({
           permission: key,
@@ -853,6 +1154,7 @@ export namespace SessionPrompt {
           },
           result,
         )
+        await hookRunner.runToolAfter({ tool: key, args, sessionID: ctx.sessionID, result })
 
         const textParts: string[] = []
         const attachments: MessageV2.FilePart[] = []
@@ -904,6 +1206,46 @@ export namespace SessionPrompt {
         }
       }
       tools[key] = item
+    }
+
+    // Apply tool decorators from plugin registry
+    try {
+      const registry = await Plugin.getRegistry()
+      if (registry.toolDecorators.length > 0) {
+        for (const [name, aiTool] of Object.entries(tools)) {
+          const original = aiTool.execute
+          if (!original) continue
+          const description = ("description" in aiTool ? aiTool.description : "") ?? ""
+          // Pre-check if any decorators match this tool. applyDecorators returns
+          // the original function when nothing matches, so we use a sentinel to detect that.
+          const sentinel: ToolExecuteFn = async () => ({}) as any
+          const probe = applyDecorators(registry.toolDecorators, name, description, sentinel)
+          if (probe === sentinel) continue
+          // At least one decorator matches. Re-wrap execute so that each call
+          // creates its own adapted function with the correct ToolCallOptions,
+          // avoiding the race condition when the AI SDK invokes parallel tool calls.
+          aiTool.execute = async (args: any, options: ToolCallOptions) => {
+            const adapted: ToolExecuteFn = async (a, _decoratorCtx) => {
+              const result = await original(a, options)
+              return result as any
+            }
+            const decorated = applyDecorators(registry.toolDecorators, name, description, adapted)
+            const ctx: ToolDecoratorContext = {
+              sessionID: input.session.id,
+              agent: input.agent.name,
+              tool: name,
+              callID: options.toolCallId,
+            }
+            return decorated(args, ctx) as any
+          }
+        }
+      }
+    } catch (err) {
+      // Plugin system not yet initialized — skip decorator application.
+      // Log unexpected errors so they aren't silently swallowed.
+      if (err && !(err instanceof Error && err.message.includes("not initialized"))) {
+        log.warn("decorator application failed", { error: String(err) })
+      }
     }
 
     return tools
@@ -1310,6 +1652,17 @@ export namespace SessionPrompt {
         parts,
       },
     )
+
+    // Fire typed message.received hook
+    const textContent = parts
+      .filter((p) => p.type === "text")
+      .map((p) => p.text)
+      .join("\n")
+    if (textContent) {
+      Plugin.getHookRunner()
+        .then((runner) => runner.runMessageReceived({ sessionID: input.sessionID, content: textContent }))
+        .catch(() => {})
+    }
 
     await Session.updateMessage(info)
     for (const part of parts) {

@@ -142,6 +142,10 @@ export namespace SessionCompaction {
       model,
       abort: input.abort,
     })
+    // Fire typed compaction.before hook
+    const runner = await Plugin.getHookRunner()
+    await runner.runCompactionBefore({ sessionID: input.sessionID })
+
     // Allow plugins to inject context or replace compaction prompt
     const compacting = await Plugin.trigger(
       "experimental.session.compacting",
@@ -224,6 +228,7 @@ When constructing the summary, try to stick to this template:
       })
     }
     if (processor.message.error) return "stop"
+    await runner.runCompactionAfter({ sessionID: input.sessionID })
     Bus.publish(Event.Compacted, { sessionID: input.sessionID })
     return "continue"
   }

@@ -1190,6 +1190,30 @@ export namespace Config {
             .describe("Timeout in milliseconds for model context protocol (MCP) requests"),
         })
         .optional(),
+      plugins: z
+        .object({
+          load: z
+            .object({
+              paths: z.array(z.string()).optional().describe("Additional plugin paths to load"),
+            })
+            .optional(),
+          slots: z
+            .record(z.string(), z.string())
+            .optional()
+            .describe("Exclusive slot assignments, e.g. { memory: 'memory-lancedb' }"),
+          entries: z
+            .record(
+              z.string(),
+              z.object({
+                enabled: z.boolean().optional().describe("Enable/disable this plugin"),
+                config: z.record(z.string(), z.any()).optional().describe("Plugin-specific configuration"),
+              }),
+            )
+            .optional()
+            .describe("Per-plugin configuration"),
+        })
+        .optional()
+        .describe("Plugin system configuration"),
     })
     .strict()
     .meta({

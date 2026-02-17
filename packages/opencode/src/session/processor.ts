@@ -10,6 +10,7 @@ import { SessionRetry } from "./retry"
 import { SessionStatus } from "./status"
 import { Plugin } from "@/plugin"
 import type { Provider } from "@/provider/provider"
+import { type StreamEvent, type StreamTransformFn, composeTransforms } from "@/plugin/stream"
 import { LLM } from "./llm"
 import { Config } from "@/config/config"
 import { SessionCompaction } from "./compaction"
@@ -46,13 +47,29 @@ export namespace SessionProcessor {
         log.info("process")
         needsCompaction = false
         const shouldBreak = (await Config.get()).experimental?.continue_loop_on_deny !== true
+        // Resolve stream transforms once (outside the retry loop)
+        let streamTransform: StreamTransformFn | undefined
+        try {
+          const registry = await Plugin.getRegistry()
+          if (registry.streamTransforms.length > 0) {
+            streamTransform = composeTransforms(registry.streamTransforms)
+          }
+        } catch {
+          // Plugin system not yet initialized — skip stream transforms
+        }
+
         while (true) {
           try {
             let currentText: MessageV2.TextPart | undefined
             let reasoningMap: Record<string, MessageV2.ReasoningPart> = {}
             const stream = await LLM.stream(streamInput)
 
-            for await (const value of stream.fullStream) {
+            // Wrap fullStream with plugin stream transforms if any are registered
+            const fullStream = streamTransform
+              ? wrapStreamWithTransforms(stream.fullStream, streamTransform)
+              : stream.fullStream
+
+            for await (const value of fullStream) {
               input.abort.throwIfAborted()
               switch (value.type) {
                 case "start":
@@ -172,14 +189,27 @@ export namespace SessionProcessor {
                 case "tool-result": {
                   const match = toolcalls[value.toolCallId]
                   if (match && match.state.status === "running") {
+                    // Fire typed tool.result.persist hook (modifying — can alter output/title/metadata)
+                    const persistInput = value.input ?? match.state.input
+                    const hookRunner = await Plugin.getHookRunner()
+                    const persistResult = await hookRunner.runToolResultPersist({
+                      sessionID: input.assistantMessage.sessionID,
+                      tool: match.tool,
+                      callID: value.toolCallId,
+                      output: value.output.output,
+                      title: value.output.title,
+                      metadata: value.output.metadata,
+                      input: persistInput,
+                    })
+
                     await Session.updatePart({
                       ...match,
                       state: {
                         status: "completed",
-                        input: value.input ?? match.state.input,
-                        output: value.output.output,
-                        metadata: value.output.metadata,
-                        title: value.output.title,
+                        input: persistInput,
+                        output: persistResult?.output ?? value.output.output,
+                        metadata: persistResult?.metadata ?? value.output.metadata,
+                        title: persistResult?.title ?? value.output.title,
                         time: {
                           start: match.state.time.start,
                           end: Date.now(),
@@ -406,5 +436,66 @@ export namespace SessionProcessor {
       },
     }
     return result
+  }
+
+  /**
+   * Wrap an AI SDK fullStream with plugin stream transforms.
+   *
+   * Strategy: Only map event types that transforms commonly need to inspect
+   * (text-delta, error, finish). All other events pass through as "other"
+   * carrying the original AI SDK event, so they round-trip without losing
+   * fields like toolCallId, id, providerMetadata, etc.
+   */
+  function wrapStreamWithTransforms(fullStream: AsyncIterable<any>, transform: StreamTransformFn): AsyncIterable<any> {
+    // Map AI SDK events → StreamEvent (only safe-to-simplify types)
+    async function* toStreamEvents(source: AsyncIterable<any>): AsyncIterable<StreamEvent> {
+      for await (const value of source) {
+        switch (value.type) {
+          case "text-delta":
+            yield { type: "text-delta", text: value.text }
+            break
+          case "error":
+            yield { type: "error", error: value.error }
+            break
+          case "finish":
+            yield { type: "finish", reason: value.finishReason ?? "stop" }
+            break
+          default:
+            // All other events (reasoning-*, tool-*, start-step, finish-step,
+            // text-start, text-end, etc.) pass through as "other" to preserve
+            // all their fields (toolCallId, id, providerMetadata, input, etc.)
+            yield { type: "other", event: value }
+            break
+        }
+      }
+    }
+
+    // Map StreamEvent back → AI SDK events
+    async function* fromStreamEvents(source: AsyncIterable<StreamEvent>): AsyncIterable<any> {
+      for await (const event of source) {
+        switch (event.type) {
+          case "text-delta":
+            yield { type: "text-delta", text: event.text }
+            break
+          case "error":
+            yield { type: "error", error: event.error }
+            break
+          case "finish":
+            yield { type: "finish", finishReason: event.reason }
+            break
+          case "other":
+            // Re-yield the original AI SDK event with all fields intact
+            yield event.event
+            break
+          default:
+            // reasoning-delta, tool-call, tool-result — these would only
+            // appear if a transform injected them. Pass through as-is.
+            yield event
+            break
+        }
+      }
+    }
+
+    return fromStreamEvents(transform(toStreamEvents(fullStream)))
   }
 }

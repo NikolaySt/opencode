@@ -130,9 +130,36 @@ export namespace ToolRegistry {
     },
     agent?: Agent.Info,
   ) {
-    const tools = await all()
+    const allTools = await all()
+
+    // Resolve tool factories from the plugin registry (lazy, context-aware)
+    try {
+      const registry = await Plugin.getRegistry()
+      const config = await Config.get()
+      for (const entry of registry.toolFactories) {
+        try {
+          const produced = entry.factory({
+            config,
+            pluginConfig: entry.pluginConfig,
+            agent: agent?.name,
+          })
+          if (!produced) continue
+          const defs = Array.isArray(produced) ? produced : [produced]
+          for (const def of defs) {
+            if (!def) continue
+            const name = (def as ToolDefinition & { name?: string }).name ?? entry.pluginId
+            allTools.push(fromPlugin(name, def))
+          }
+        } catch (err) {
+          log.error("plugin tool factory failed", { plugin: entry.pluginId, error: String(err) })
+        }
+      }
+    } catch {
+      // Plugin system not yet initialized — skip factory resolution
+    }
+
     const result = await Promise.all(
-      tools
+      allTools
         .filter((t) => {
           // Enable websearch/codesearch for zen users OR via enable flag
           if (t.id === "codesearch" || t.id === "websearch") {

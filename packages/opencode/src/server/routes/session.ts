@@ -16,6 +16,7 @@ import { Log } from "../../util/log"
 import { PermissionNext } from "@/permission/next"
 import { errors } from "../error"
 import { lazy } from "../../util/lazy"
+import { Plugin } from "@/plugin"
 
 const log = Log.create({ service: "server" })
 
@@ -276,6 +277,7 @@ export const SessionRoutes = lazy(() =>
         const sessionID = c.req.valid("param").sessionID
         const updates = c.req.valid("json")
 
+        const before = await Session.get(sessionID)
         const updatedSession = await Session.update(
           sessionID,
           (session) => {
@@ -286,6 +288,13 @@ export const SessionRoutes = lazy(() =>
           },
           { touch: false },
         )
+
+        // Fire session.archived hook when archive timestamp transitions from unset to set
+        if (updates.time?.archived && !before.time.archived) {
+          Plugin.getHookRunner()
+            .then((runner) => runner.runSessionArchived({ sessionID }))
+            .catch(() => {})
+        }
 
         return c.json(updatedSession)
       },
