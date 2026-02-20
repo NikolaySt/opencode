@@ -34,3 +34,7 @@ nul
 # Agents
 .claude
 .opencode
+
+
+# Memory files
+/MEMORY*.md
