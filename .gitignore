@@ -30,3 +30,7 @@ logs/
 
 # Fix Claude Agent Issue
 nul
+
+# Agents
+.claude
+.opencode
