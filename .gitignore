@@ -27,3 +27,6 @@ target
 opencode-dev
 logs/
 *.bun-build
+
+# Fix Claude Agent Issue
+nul
