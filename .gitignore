@@ -27,6 +27,7 @@ target
 opencode-dev
 logs/
 *.bun-build
+tsconfig.tsbuildinfo
 
 # Fix Claude Agent Issue
 nul

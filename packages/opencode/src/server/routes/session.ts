@@ -54,15 +54,15 @@ export const SessionRoutes = lazy(() =>
       ),
       async (c) => {
         const query = c.req.valid("query")
-        const term = query.search?.toLowerCase()
         const sessions: Session.Info[] = []
-        for await (const session of Session.list()) {
-          if (query.directory !== undefined && session.directory !== query.directory) continue
-          if (query.roots && session.parentID) continue
-          if (query.start !== undefined && session.time.updated < query.start) continue
-          if (term !== undefined && !session.title.toLowerCase().includes(term)) continue
+        for await (const session of Session.list({
+          directory: query.directory,
+          roots: query.roots,
+          start: query.start,
+          search: query.search,
+          limit: query.limit,
+        })) {
           sessions.push(session)
-          if (query.limit !== undefined && sessions.length >= query.limit) break
         }
         return c.json(sessions)
       },
@@ -278,16 +278,13 @@ export const SessionRoutes = lazy(() =>
         const updates = c.req.valid("json")
 
         const before = await Session.get(sessionID)
-        const updatedSession = await Session.update(
-          sessionID,
-          (session) => {
-            if (updates.title !== undefined) {
-              session.title = updates.title
-            }
-            if (updates.time?.archived !== undefined) session.time.archived = updates.time.archived
-          },
-          { touch: false },
-        )
+        let session = before
+        if (updates.title !== undefined) {
+          session = await Session.setTitle({ sessionID, title: updates.title })
+        }
+        if (updates.time?.archived !== undefined) {
+          session = await Session.setArchived({ sessionID, time: updates.time.archived })
+        }
 
         // Fire session.archived hook when archive timestamp transitions from unset to set
         if (updates.time?.archived && !before.time.archived) {
@@ -296,7 +293,7 @@ export const SessionRoutes = lazy(() =>
             .catch(() => {})
         }
 
-        return c.json(updatedSession)
+        return c.json(session)
       },
     )
     .post(
