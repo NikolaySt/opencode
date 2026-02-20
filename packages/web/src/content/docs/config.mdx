@@ -500,6 +500,38 @@ You can control context compaction behavior through the `compaction` option.
 - `prune` - Remove old tool outputs to save tokens (default: `true`).
 - `reserved` - Token buffer for compaction. Leaves enough window to avoid overflow during compaction
 
+[Learn more](/docs/memory#work-with-compaction) about how compaction and memory work together.
+
+---
+
+### Plugins
+
+You can configure plugin slots and per-plugin settings through the `plugins` option. The `memory` slot is exclusive — only one memory plugin can be active.
+
+```json title="opencode.json"
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": {
+    "slots": {
+      "memory": "opencode-supermemory"
+    },
+    "entries": {
+      "opencode-supermemory": {
+        "enabled": true,
+        "config": {
+          "apiKey": "{env:SUPERMEMORY_API_KEY}"
+        }
+      }
+    }
+  }
+}
+```
+
+- `slots` - Exclusive slot assignments (e.g. `{ memory: "plugin-id" }`)
+- `entries` - Per-plugin enable/disable and configuration
+
+[Learn more](/docs/memory#extend-with-plugins) about memory plugins and [available plugins](/docs/ecosystem#plugins).
+
 ---
 
 ### Watcher

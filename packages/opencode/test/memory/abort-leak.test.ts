@@ -25,6 +25,10 @@ const getHeapMB = () => {
 }
 
 describe("memory: abort controller leak", () => {
+  // NOTE: This test exercises WebFetchTool memory behavior, not the memory
+  // subsystem itself. It serves as a smoke test verifying the closure→bind
+  // refactor doesn't regress heap growth. It passes vacuously when network
+  // is unavailable since the fetch calls catch errors.
   test("webfetch does not leak memory over many invocations", async () => {
     await Instance.provide({
       directory: projectRoot,
@@ -60,9 +64,10 @@ describe("memory: abort controller leak", () => {
   test("compare closure vs bind pattern directly", async () => {
     const ITERATIONS = 500
 
-    // Test OLD pattern: arrow function closure
-    // Store closures in a map keyed by content to force retention
-    const closureMap = new Map<string, () => void>()
+    // Both patterns store their handlers in an array of same size to ensure
+    // fair retention. The difference is that the closure pattern captures
+    // the large `content` string in scope, while bind doesn't.
+    const handlers1: (() => void)[] = []
     const timers: Timer[] = []
     const controllers: AbortController[] = []
 
@@ -71,17 +76,15 @@ describe("memory: abort controller leak", () => {
     const baseline = getHeapMB()
 
     for (let i = 0; i < ITERATIONS; i++) {
-      // Simulate large response body like webfetch would have
       const content = `${i}:${"x".repeat(50 * 1024)}` // 50KB unique per iteration
       const controller = new AbortController()
       controllers.push(controller)
 
-      // OLD pattern - closure captures `content`
+      // OLD pattern - closure captures `content` in scope
       const handler = () => {
-        // Actually use content so it can't be optimized away
         if (content.length > 1000000000) controller.abort()
       }
-      closureMap.set(content, handler)
+      handlers1.push(handler)
       const timeoutId = setTimeout(handler, 30000)
       timers.push(timeoutId)
     }
@@ -91,14 +94,14 @@ describe("memory: abort controller leak", () => {
     const after = getHeapMB()
     const oldGrowth = after - baseline
 
-    console.log(`OLD pattern (closure): ${oldGrowth.toFixed(2)} MB growth (${closureMap.size} closures)`)
+    console.log(`OLD pattern (closure): ${oldGrowth.toFixed(2)} MB growth (${handlers1.length} handlers)`)
 
     // Cleanup after measuring
     timers.forEach(clearTimeout)
     controllers.forEach((c) => c.abort())
-    closureMap.clear()
+    handlers1.length = 0
 
-    // Test NEW pattern: bind
+    // Test NEW pattern: bind (with same array retention)
     Bun.gc(true)
     Bun.sleepSync(100)
     const baseline2 = getHeapMB()
@@ -131,6 +134,9 @@ describe("memory: abort controller leak", () => {
     console.log(`NEW pattern (bind): ${newGrowth.toFixed(2)} MB growth`)
     console.log(`Improvement: ${(oldGrowth - newGrowth).toFixed(2)} MB saved`)
 
+    // Bind pattern should use less or equal memory since it doesn't capture the 50KB strings.
+    // When GC is aggressive (both 0), the test still passes — the key property is
+    // that bind never uses MORE memory than closures capturing large scope.
     expect(newGrowth).toBeLessThanOrEqual(oldGrowth)
   })
 })

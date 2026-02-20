@@ -1,0 +1,371 @@
+---
+title: Memory Architecture
+description: Internals of the built-in memory plugin.
+---
+
+This page documents the internal architecture of OpenCode's built-in memory plugin. It covers the data model, pipelines, embedding system, and maintenance engine. Intended for contributors and plugin authors.
+
+---
+
+## Review the data model
+
+The memory plugin uses one SQLite database per project, stored at `~/.local/share/opencode/memory/{projectID}.sqlite`. WAL mode is enabled for concurrent reads.
+
+---
+
+### Follow the schema
+
+The database has seven tables (including one FTS5 virtual table) across two schema versions.
+
+| Table             | Purpose                                                   |
+| ----------------- | --------------------------------------------------------- |
+| `meta`            | Schema version tracking                                   |
+| `files`           | Indexed file paths with hashes and mtimes                 |
+| `chunks`          | Text chunks with embeddings, truth states, and confidence |
+| `chunks_fts`      | FTS5 external-content virtual table for keyword search    |
+| `entities`        | Structured tags (kind + value) linked to chunks           |
+| `embedding_cache` | Cached embeddings keyed by text hash                      |
+| `summaries`       | Extracted session knowledge with truth states             |
+
+Chunks store embeddings as BLOBs (8 bytes per dimension, float64) — ~4x more compact than JSON. `deserialize` uses `DataView` for cross-platform correctness since `bun:sqlite` returns `Uint8Array`.
+
+---
+
+### Understand chunk IDs
+
+Chunk IDs use the format `{relative_path}:{startLine}-{endLine}` with forward-slash normalization. This ensures cross-platform database portability since `path.relative` returns backslashes on Windows.
+
+---
+
+### Review truth states
+
+Every chunk and summary carries a `truth_state` that feeds into search ranking.
+
+| State        | Weight | Meaning                        |
+| ------------ | ------ | ------------------------------ |
+| `validated`  | 1.0    | Confirmed knowledge            |
+| `candidate`  | 0.7    | Awaiting validation            |
+| `hypothesis` | 0.4    | Speculative                    |
+| `disputed`   | 0.3    | Contradicted by newer evidence |
+| `deprecated` | 0.1    | Superseded or outdated         |
+
+File-sourced chunks start as `validated`. Session summaries start as `candidate`. The maintenance engine manages transitions.
+
+---
+
+## Trace the module map
+
+The plugin is organized into 16 source files.
+
+```
+src/memory/
+├── index.ts          Plugin entry: definition + register() wiring
+├── schema.ts         SQL table DDL (v1 + v2 migrations), row types
+├── config.ts         MemoryConfig / ResolvedConfig types, resolve()
+├── store.ts          SQLite lifecycle, CRUD, FTS, entities, GC
+├── chunk.ts          Markdown chunking with heading preservation
+├── embed.ts          Provider interface, registry, cosine, BLOB serde
+├── embed-openai.ts   OpenAI embedding provider (retry, batching)
+├── entity.ts         Regex + LLM entity extraction
+├── sync.ts           File discovery, change detection, index pipeline
+├── search.ts         Hybrid vector + FTS5 search with composable filters
+├── tools.ts          memory_search and memory_get tool definitions
+├── inject.ts         Priority-based context injection with budget scaling
+├── extract.ts        Session summary extraction (title or LLM mode)
+├── maintain.ts       Maintenance engine (5 subsystems + orchestrator)
+├── watcher.ts        Instance-scoped fs.watch with debounce
+└── metrics.ts        In-memory metrics tracker
+```
+
+---
+
+## Follow the indexing pipeline
+
+File sync (`sync.ts`) discovers and indexes knowledge files. It runs on session start, on lazy re-sync before search, and on manual `/memory sync`.
+
+---
+
+### Discover files
+
+The discovery function checks three sources in order.
+
+1. `MEMORY.md` or `memory.md` in the project root (first match wins)
+2. All `**/*.md` files in the `memory/` directory
+3. Extra paths from config (supports files and directories)
+
+Results are deduplicated by absolute resolved path.
+
+---
+
+### Index content
+
+For each discovered file, the pipeline hashes the content and skips unchanged files. Changed files are chunked, embedded, and stored.
+
+Chunking uses character-budget splitting (default 1600 chars) with overlap carry from the previous chunk (default 320 chars). Heading context is preserved — chunks that don't start with a heading get the most recent heading hierarchy prepended.
+
+SHA-256 hashes enable embedding cache hits. Only changed content makes API calls.
+
+---
+
+### Extract entities
+
+After indexing, each chunk is tagged with structured entities. In regex mode, the extractor identifies file paths, PascalCase classes, camelCase functions, snake_case identifiers, and technology keywords from a curated list of 90+ terms.
+
+In LLM mode, a structured prompt asks the model for `{kind, value}` pairs. It falls back to regex on errors.
+
+---
+
+## Follow the search pipeline
+
+Hybrid search (`search.ts`) combines vector similarity with FTS5 keyword matching.
+
+---
+
+### Understand scoring
+
+The final score formula is:
+
+```
+score = (vecScore * 0.7 + txtScore * 0.3) * truthWeight * recencyBoost
+```
+
+Vector scores come from cosine similarity against all filtered chunks. Text scores come from FTS5 BM25 rank normalized via `neg / (1 + neg)`. Recency boost is `1.0 / (1 + daysSinceUpdate / 90)`.
+
+---
+
+### Apply filters
+
+Search supports composable SQL pre-filters that reduce the candidate set before brute-force vector search.
+
+| Filter       | Example                              |
+| ------------ | ------------------------------------ |
+| `source`     | `"memory"` or `"sessions"`           |
+| `pathGlob`   | `"src/auth/*"`                       |
+| `entity`     | `"redis"` (maps to technology kind)  |
+| `truthState` | `"validated"`                        |
+| `dateRange`  | `{ from: timestamp, to: timestamp }` |
+
+---
+
+## Follow the injection pipeline
+
+Context injection (`inject.ts`) builds the memory packet at each agent start using a priority-based budget with context-aware scaling.
+
+---
+
+### Understand budget scaling
+
+Before building content, the system estimates remaining context budget. It reads the model's context limit and the last assistant message's token count.
+
+```
+available = contextLimit - usedTokens - safetyMargin(5000)
+effectiveMax = min(configuredMaxTokens, available)
+```
+
+Three operating modes based on available budget:
+
+| Condition               | Mode           | Behavior                                                           |
+| ----------------------- | -------------- | ------------------------------------------------------------------ |
+| Available >= 50% of max | **Normal**     | 5 search results, 5 summaries, 300-char snippets, entity matching  |
+| Available < 50% of max  | **Compressed** | 2 search results, 2 summaries, 100-char snippets, entities skipped |
+| Available < 200 tokens  | **Skip**       | Injection skipped entirely                                         |
+
+This prevents "prompt is too long" errors when sessions are near the context limit. On first turn (no prior assistant message), the full configured budget is used.
+
+---
+
+### Review priority tiers
+
+| Tier     | Budget                               | Source                  |
+| -------- | ------------------------------------ | ----------------------- |
+| P1 (30%) | `MEMORY.md` up to first `##` heading | Project invariants      |
+| P2 (40%) | Search results matching user's query | Relevant context        |
+| P3 (20%) | Recent session summaries             | Cross-session knowledge |
+| P4 (10%) | Entity-matched chunks                | Structured recall       |
+
+Unused budget flows from one tier to the next. `fitSection()` truncates at item boundaries, never mid-content.
+
+---
+
+## Follow the extraction pipeline
+
+Session extraction runs when agents finish or sessions are archived.
+
+---
+
+### Understand triggers
+
+The `agent.finish` hook is the primary trigger with a 5-minute per-session cooldown. The `session.archived` hook is a fallback. This ensures extraction happens even if the TUI doesn't explicitly archive.
+
+---
+
+### Review LLM extraction
+
+In LLM mode, the extractor reads up to 50 session messages, builds a `[role]: content` transcript, and asks the model to extract structured knowledge — decisions, root causes, patterns, and conventions.
+
+The result is stored as both a summary (in the `summaries` table) and a searchable chunk (with `source="sessions"`). Entities are extracted and linked. Contradictions are detected against existing entries.
+
+Summary and chunk IDs use `summary:{sessionID}` for idempotent re-extraction.
+
+---
+
+## Follow the maintenance pipeline
+
+The maintenance engine runs hourly via cron and can be triggered manually with `/memory maintain`. It has five subsystems.
+
+---
+
+### Detect staleness
+
+For each session chunk, the engine extracts file path references from the text. If all referenced files have been deleted, the chunk is deprecated. If some files changed after the chunk was created, it's disputed with lowered confidence.
+
+Path extraction requires `/` in paths to avoid bare filename false positives. Resolution uses `path.isAbsolute()` + `path.join()` for cross-platform correctness.
+
+---
+
+### Manage summaries
+
+Three operations run on summaries.
+
+- **TTL expiry** — candidates older than `summaryTTLDays` (default 90) are deprecated
+- **Count cap** — when over `maxSummaries` (default 100), the oldest deprecated/candidates are deleted
+- **Auto-promote** — clusters of 3+ similar summaries (cosine > 0.85) are promoted; the longest becomes validated, others are deprecated
+
+---
+
+### Migrate embeddings
+
+When the embedding model changes, chunks with outdated `embedding_model` values are re-embedded in batches of 50. The cache and chunk are updated atomically.
+
+---
+
+### Detect contradictions
+
+After each extraction, the new entry's embedding is compared against all existing chunks. If cosine similarity > 0.85 from a different source or date, the older entry is marked as disputed.
+
+Same-source, same-day entries are excluded to avoid self-contradiction.
+
+---
+
+### Clean up deprecated
+
+Deprecated chunks older than `deprecatedCleanupDays` (default 180) are hard-deleted. GC then optimizes the FTS index and prunes orphaned cache/entity entries.
+
+---
+
+## Review the embedding system
+
+Embeddings use a provider abstraction with a registry pattern.
+
+---
+
+### Understand the provider interface
+
+```ts
+type EmbeddingProvider = {
+  embed(texts: string[]): Promise<number[][]>
+  dimensions(): number
+  model(): string
+}
+```
+
+Providers register via `Embed.register(name, factory)`. The OpenAI provider (`text-embedding-3-small`, 1536 dims) auto-registers on import.
+
+---
+
+### Review retry behavior
+
+The OpenAI provider retries 3 times with exponential backoff (500ms base, 8s max). Per-request timeout is 30 seconds. Batches up to 2048 inputs per request.
+
+429 and 5xx errors are retryable. 4xx errors (except 429) fail immediately. Metrics track calls, texts, errors, and latency.
+
+---
+
+### Understand caching
+
+The `embedding_cache` table is keyed by SHA-256 hash of the chunk text. On re-index, unchanged chunks reuse cached embeddings without an API call. Cache entries are pruned during GC when no corresponding chunk exists.
+
+---
+
+## Review the file watcher
+
+The watcher (`watcher.ts`) provides live change detection for memory files.
+
+---
+
+### Understand the design
+
+It watches `MEMORY.md`, `memory.md`, the `memory/` directory, extra config paths, and the worktree root (for new file creation). Changes are debounced by a configurable delay (default 1500ms).
+
+The watcher sets a `dirty` flag rather than triggering sync directly. Sync runs lazily on the next `agent.start` if the flag is set. Each `create()` call returns an independent watcher instance.
+
+Error handlers on all watchers prevent unhandled crashes.
+
+---
+
+## Review model resolution
+
+Memory LLM calls use a 3-tier model resolution independent of the main agent model.
+
+1. **Plugin config model** — `config.model` (e.g., `"anthropic/claude-haiku-4-5"`)
+2. **Provider's small model** — `Provider.getSmallModel()` for the active provider
+3. **Default model** — `Provider.defaultModel()`
+
+The resolved model creates a `generate(prompt) → string` function via the `ai` package with `temperature: 0.2` and `maxOutputTokens: 2000`. If no model is available, extraction falls back to title mode and entity extraction falls back to regex.
+
+---
+
+## Review registration lifecycle
+
+The plugin registers synchronously to avoid blocking server startup. All network I/O is deferred.
+
+```
+MemoryPlugin.register(api)
+  ├── Resolve config
+  ├── Open SQLite database
+  ├── Create embedding provider
+  ├── Register tools (memory_search, memory_get)
+  ├── Register agent.start hook (injection + deferred sync)
+  ├── Register agent.finish hook (extraction)
+  ├── Register session.archived hook (extraction fallback)
+  ├── Register memory-watcher service
+  ├── Register memory-maintenance cron (hourly)
+  └── Register /memory chat command
+```
+
+Initial sync runs lazily on the first `agent.start` rather than during registration.
+
+---
+
+## Review metrics
+
+The plugin tracks in-memory metrics that reset on process restart.
+
+| Category    | Keys                                                                                                                                                                             |
+| ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Injection   | `injections`, `injectionHits`, `injectionMisses`, `injectionChars`, `injectionBudgetScaled`, `injectionSkippedOverflow`                                                          |
+| Search      | `searches`, `searchHits`, `searchMisses`, `searchLatencyMs`                                                                                                                      |
+| Extraction  | `extractions`, `extractionEmpty`, `extractionLLM`, `extractionTitle`                                                                                                             |
+| Maintenance | `maintenanceRuns`, `maintenanceStaleDeprecated`, `maintenanceStaleDisputed`, `maintenanceSummariesDeleted`, `maintenancePromoted`, `maintenanceMigrated`, `maintenanceCleanedUp` |
+| Embedding   | `embeddingCalls`, `embeddingTexts`, `embeddingErrors`, `embeddingLatencyMs`, `embeddingCacheHits`, `embeddingCacheMisses`                                                        |
+
+View metrics with `/memory metrics` during a session.
+
+---
+
+## Replace the built-in plugin
+
+The memory slot uses an exclusive assignment model. Community plugins can override it.
+
+```json title="opencode.json"
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": {
+    "slots": {
+      "memory": "my-memory-plugin"
+    }
+  }
+}
+```
+
+The built-in plugin loads before discovery candidates so it wins by default. See the [plugins docs](/docs/plugins) for how to write a memory plugin using the `agent.start`, `agent.finish`, and `session.archived` hooks.

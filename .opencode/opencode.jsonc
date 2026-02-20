@@ -13,4 +13,25 @@
     "github-triage": false,
     "github-pr-search": false,
   },
+  "plugins": {
+    "entries": {
+      "alpha": {
+        "enabled": true,
+        "config": { "greeting": "Hello from Alpha" },
+      },
+      "beta": {
+        "enabled": true,
+        "config": { "blockedTerms": ["danger-word", "rm -rf /"] },
+      },
+      "example": {
+        "enabled": true,
+      },
+      "opencode-memory": {
+        "enabled": true,
+        "config": {
+          "model": "anthropic/claude-haiku-4-5",
+        },
+      },
+    },
+  },
 }

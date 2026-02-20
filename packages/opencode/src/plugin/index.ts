@@ -18,6 +18,7 @@ import { createHookRunner, type HookRunner } from "./hooks"
 import { validatePluginConfig } from "./validation"
 import { resolveSlotDecision } from "./slots"
 import * as ChatCommand from "../command/chat-command"
+import * as MemoryPlugin from "../memory/index"
 
 export namespace Plugin {
   const log = Log.create({ service: "plugin" })
@@ -160,6 +161,72 @@ export namespace Plugin {
     const seenIds = new Map<string, string>()
     const memorySlot = pluginsConfig?.slots?.memory
     let selectedMemoryId: string | null = null
+
+    // ----- Bundled new-style plugins (loaded before discovery candidates) -----
+    {
+      const def = MemoryPlugin.definition
+      const pluginId = def.id
+      const entry = pluginsConfig?.entries?.[pluginId]
+      const enabled = entry?.enabled !== false
+
+      const record = createPluginRecord({
+        id: pluginId,
+        name: def.name,
+        description: def.description,
+        version: def.version,
+        source: "bundled",
+        origin: "bundled" as const,
+        workspaceDir: Instance.directory,
+        enabled,
+        configSchema: false,
+      })
+      record.kind = def.kind
+
+      if (!enabled) {
+        record.status = "disabled"
+        record.error = "disabled by config"
+        registryFactory.registry.plugins.push(record)
+      } else {
+        const slotDecision = resolveSlotDecision({
+          id: pluginId,
+          kind: def.kind,
+          slot: memorySlot,
+          selectedId: selectedMemoryId,
+        })
+
+        if (!slotDecision.enabled) {
+          record.enabled = false
+          record.status = "disabled"
+          record.error = slotDecision.reason
+          registryFactory.registry.plugins.push(record)
+        } else {
+          if (slotDecision.selected) selectedMemoryId = pluginId
+          const validated = validatePluginConfig({ value: entry?.config })
+          if (!validated.ok) {
+            record.status = "error"
+            record.error = `invalid config: ${validated.errors.join(", ")}`
+            registryFactory.registry.plugins.push(record)
+          } else {
+            const api = registryFactory.createApi(record, { config, pluginConfig: validated.value })
+            try {
+              await MemoryPlugin.register(api)
+              registryFactory.registry.plugins.push(record)
+              log.info("loaded bundled plugin", {
+                id: pluginId,
+                tools: record.toolNames.length,
+                hooks: record.hookCount,
+              })
+            } catch (err) {
+              log.warn("bundled plugin register failed", { id: pluginId, error: String(err) })
+              record.status = "error"
+              record.error = String(err)
+              registryFactory.registry.plugins.push(record)
+            }
+          }
+        }
+      }
+      seenIds.set(pluginId, "bundled")
+    }
 
     for (const candidate of discoveryResult.candidates) {
       const pluginId = candidate.idHint

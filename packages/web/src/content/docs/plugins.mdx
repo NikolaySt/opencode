@@ -383,3 +383,22 @@ Format as a structured prompt that a new agent can use to resume work.
 ```
 
 When `output.prompt` is set, it completely replaces the default compaction prompt. The `output.context` array is ignored in this case.
+
+---
+
+### Memory plugins
+
+OpenCode has an exclusive `"memory"` plugin slot for persistent cross-session recall. Only one memory plugin can be active at a time.
+
+```json title="opencode.json"
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": {
+    "slots": {
+      "memory": "my-memory-plugin"
+    }
+  }
+}
+```
+
+Memory plugins typically use the `agent.start` hook to inject retrieved context and `tool.result.persist` to index new information. [Learn more](/docs/memory#extend-with-plugins) about how memory works and how to build a memory plugin.

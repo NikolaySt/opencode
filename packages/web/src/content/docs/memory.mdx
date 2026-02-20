@@ -1,0 +1,421 @@
+---
+title: Memory
+description: Persistent cross-session recall for your projects.
+---
+
+OpenCode ships with a built-in memory system that gives agents persistent recall across sessions. It indexes project knowledge files, extracts session learnings, and injects relevant context automatically.
+
+---
+
+## Know the layers
+
+Memory in OpenCode is split into distinct layers.
+
+| Layer                 | Scope          | Persistence          | Example                                    |
+| --------------------- | -------------- | -------------------- | ------------------------------------------ |
+| **Session history**   | Single session | Disk (JSON)          | Tool calls, LLM responses, reasoning       |
+| **Working memory**    | Single session | Disk (JSON)          | Todo lists, plan files                     |
+| **Project knowledge** | All sessions   | Disk (files)         | `AGENTS.md`, `MEMORY.md`, skills           |
+| **Memory plugin**     | All sessions   | SQLite (per project) | Vector search, session summaries, entities |
+
+---
+
+## Set up project knowledge
+
+Create a `MEMORY.md` file in your project root. This is the primary source of persistent knowledge — it gets indexed and injected into every session.
+
+```md title="MEMORY.md"
+# Project Knowledge
+
+## Key Decisions
+
+- We use PostgreSQL for the main database
+- Authentication is handled by Auth0
+- All API routes require JWT validation
+
+## Conventions
+
+- Use snake_case for database columns
+- React components go in src/components/
+```
+
+You can also create files in a `memory/` directory for additional knowledge.
+
+```
+memory/
+├── architecture.md
+├── deployment.md
+└── api-patterns.md
+```
+
+Point to extra knowledge files anywhere in your project using the `paths` config.
+
+```json title="opencode.json"
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": {
+    "entries": {
+      "opencode-memory": {
+        "config": {
+          "paths": ["docs/architecture.md", "docs/conventions/"]
+        }
+      }
+    }
+  }
+}
+```
+
+---
+
+## Resume sessions
+
+Every tool call, text response, and reasoning step is persisted as JSON files. Resume a session with `--continue` or pick one from the session list.
+
+```bash frame="none"
+opencode --continue
+```
+
+---
+
+## Work with compaction
+
+When a conversation grows beyond the model's context window, OpenCode automatically summarizes older messages. After compaction, only the summary and subsequent messages are visible to the model.
+
+---
+
+### Configure compaction
+
+Control compaction behavior in your config.
+
+```json title="opencode.json"
+{
+  "$schema": "https://opencode.ai/config.json",
+  "compaction": {
+    "auto": true,
+    "prune": true,
+    "reserved": 10000
+  }
+}
+```
+
+- `auto` — automatically compact when context is full (default: `true`)
+- `prune` — remove old tool outputs to save tokens (default: `true`)
+- `reserved` — token buffer to avoid overflow during compaction
+
+---
+
+### Understand pruning
+
+Pruning clears old tool outputs while keeping the conversation structure intact. The most recent ~40,000 tokens of tool results are protected. Older tool results are replaced with a placeholder.
+
+Pruning runs after every agent loop iteration and helps delay the need for full compaction.
+
+---
+
+## Use working memory
+
+OpenCode provides two forms of in-session working memory.
+
+---
+
+### Track tasks with todos
+
+The `todowrite` and `todoread` tools let the agent maintain a structured task list during complex operations. Todos are persisted per session and survive process restarts.
+
+:::note
+Todos are session-scoped. They don't carry over to new sessions.
+:::
+
+---
+
+### Create plan files
+
+When using plan mode, OpenCode writes a plan to `.opencode/plans/`. These are regular markdown files on disk that persist across sessions.
+
+Plan files are a useful bridge between sessions — you can reference them in new conversations by mentioning the file path.
+
+---
+
+## Configure the memory plugin
+
+The built-in memory plugin uses the exclusive `"memory"` slot. Configure it under `plugins.entries["opencode-memory"]` in your config.
+
+```json title="opencode.json"
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": {
+    "entries": {
+      "opencode-memory": {
+        "enabled": true,
+        "config": {
+          "model": "anthropic/claude-haiku-4-5",
+          "injection": {
+            "maxTokens": 2000,
+            "maxTokensPercent": 2
+          },
+          "extraction": {
+            "mode": "llm",
+            "entityExtraction": "regex"
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+---
+
+### Set the LLM model
+
+The `model` field controls which model handles extraction and entity calls. It uses a 3-tier fallback: plugin config → provider's small model → default model.
+
+A cheap model like `anthropic/claude-haiku-4-5` works well since memory operations are lightweight.
+
+---
+
+### Tune embedding
+
+Configure the embedding provider for vector search.
+
+| Option                 | Default                    | Description                           |
+| ---------------------- | -------------------------- | ------------------------------------- |
+| `embedding.provider`   | `"openai"`                 | Embedding provider to use             |
+| `embedding.model`      | `"text-embedding-3-small"` | Embedding model name                  |
+| `embedding.dimensions` | —                          | Override default dimensions for model |
+
+---
+
+### Tune injection
+
+Control how much context gets prepended to each session.
+
+| Option                       | Default | Description                                       |
+| ---------------------------- | ------- | ------------------------------------------------- |
+| `injection.enabled`          | `true`  | Enable context injection at session start         |
+| `injection.maxTokens`        | `2000`  | Maximum tokens for injected context               |
+| `injection.maxTokensPercent` | —       | Cap as a percentage of the model's context window |
+
+Setting `maxTokensPercent` (e.g., `2`) caps the injection budget to that percentage of the model's context limit.
+
+---
+
+### Tune search
+
+Control the hybrid search behavior.
+
+| Option                | Default | Description                       |
+| --------------------- | ------- | --------------------------------- |
+| `search.maxResults`   | `8`     | Maximum search results returned   |
+| `search.minScore`     | `0.2`   | Minimum relevance score threshold |
+| `search.vectorWeight` | `0.7`   | Weight for vector similarity      |
+| `search.textWeight`   | `0.3`   | Weight for keyword matching       |
+
+---
+
+### Tune sync
+
+Control when knowledge files are re-indexed.
+
+| Option                 | Default | Description                              |
+| ---------------------- | ------- | ---------------------------------------- |
+| `sync.onSessionStart`  | `true`  | Sync on first agent turn                 |
+| `sync.onSearch`        | `true`  | Re-sync before search if files changed   |
+| `sync.watch`           | `true`  | Watch files for changes                  |
+| `sync.watchDebounceMs` | `1500`  | Debounce delay for file change detection |
+
+---
+
+### Tune extraction
+
+Configure how session knowledge is extracted.
+
+| Option                        | Default   | Description                                            |
+| ----------------------------- | --------- | ------------------------------------------------------ |
+| `extraction.enabled`          | `true`    | Enable session extraction                              |
+| `extraction.mode`             | `"llm"`   | `"llm"` for AI extraction, `"title"` for title only    |
+| `extraction.entityExtraction` | `"regex"` | `"regex"` for fast patterns, `"llm"` for AI extraction |
+| `extraction.autoPromote`      | `false`   | Auto-promote clusters of similar summaries             |
+| `extraction.ignoredEntities`  | `[]`      | Entity values to exclude (e.g., usernames)             |
+
+---
+
+### Tune maintenance
+
+Configure the lifecycle maintenance engine.
+
+| Option                               | Default | Description                                |
+| ------------------------------------ | ------- | ------------------------------------------ |
+| `maintenance.summaryTTLDays`         | `90`    | Days before candidate summaries expire     |
+| `maintenance.maxSummaries`           | `100`   | Maximum summaries per project              |
+| `maintenance.autoDeprecate`          | `true`  | Auto-deprecate stale entries               |
+| `maintenance.contradictionDetection` | `true`  | Detect conflicting entries                 |
+| `maintenance.deprecatedCleanupDays`  | `180`   | Days before deprecated entries are deleted |
+
+---
+
+## Use the agent tools
+
+The memory plugin registers two tools that agents call automatically.
+
+---
+
+### Search with memory_search
+
+Hybrid semantic + keyword search over the knowledge base. Agents call this before answering questions about prior work or project patterns.
+
+Supported filters: `source` (`memory` or `sessions`), `pathGlob`, `entity`, `truthState`, `maxResults`. Results include source citations, relevance scores, and truth state.
+
+---
+
+### Read with memory_get
+
+Read specific lines from a memory file. Agents call this after search to fetch full context for a relevant snippet.
+
+Path traversal protection restricts reads to within the project worktree. Capped at 200 lines per call.
+
+---
+
+## Run chat commands
+
+The `/memory` command provides diagnostic and management subcommands.
+
+**Status & diagnostics:**
+
+| Command              | Description                           |
+| -------------------- | ------------------------------------- |
+| `/memory`            | Show overview stats                   |
+| `/memory metrics`    | Show runtime metrics for this session |
+| `/memory embeddings` | Show embedding health and models      |
+
+**Browse data:**
+
+| Command                                         | Description                                     |
+| ----------------------------------------------- | ----------------------------------------------- |
+| `/memory chunks [source=X] [truth=X] [limit=N]` | List chunks with optional filters               |
+| `/memory summaries [limit]`                     | List session summaries                          |
+| `/memory entities [kind=X] [limit=N]`           | List entity tags grouped by kind                |
+| `/memory files`                                 | List indexed source files                       |
+| `/memory inspect <id>`                          | Full detail for a chunk (supports prefix match) |
+
+**Actions:**
+
+| Command                | Description                          |
+| ---------------------- | ------------------------------------ |
+| `/memory sync`         | Re-index knowledge files             |
+| `/memory gc`           | Run garbage collection               |
+| `/memory maintain`     | Run full maintenance cycle           |
+| `/memory conflicts`    | Show disputed and deprecated entries |
+| `/memory promote <id>` | Promote a chunk to validated         |
+
+---
+
+## Understand injection
+
+At each agent turn, the memory plugin automatically injects relevant context into the system prompt.
+
+---
+
+### Review the priority tiers
+
+Injected context is built from four tiers with a shared budget. Unused budget flows to the next tier.
+
+| Priority | Budget                                   | Source             |
+| -------- | ---------------------------------------- | ------------------ |
+| P1 (30%) | `MEMORY.md` up to first `##` heading     | Project invariants |
+| P2 (40%) | Search results matching the user's query | Relevant context   |
+| P3 (20%) | Recent session summaries                 | Session history    |
+| P4 (10%) | Entity-matched chunks from the query     | Related entities   |
+
+---
+
+### Understand budget scaling
+
+Before building content, the system estimates remaining context budget from the model's limit and the last response's token count.
+
+| Condition                       | Mode           | Behavior                                                      |
+| ------------------------------- | -------------- | ------------------------------------------------------------- |
+| Plenty of room                  | **Normal**     | 5 search results, 5 summaries, 300-char snippets              |
+| Budget tight (< 50% of max)     | **Compressed** | 2 search results, 2 summaries, 100-char snippets, no entities |
+| Nearly full (< 200 tokens left) | **Skip**       | Injection skipped entirely                                    |
+
+This prevents "prompt is too long" errors when sessions are near the model's context limit.
+
+---
+
+## Understand extraction
+
+When a session ends, the plugin extracts key learnings and stores them for future retrieval.
+
+---
+
+### Review the flow
+
+Extraction triggers on `agent.finish` (primary, with a 5-minute cooldown) and `session.archived` (fallback). In LLM mode, it extracts structured knowledge — decisions, patterns, root causes, and conventions.
+
+The result is stored in SQLite, embedded for vector search, and tagged with entities.
+
+---
+
+### Review truth states
+
+Every stored chunk carries a truth state that affects search ranking.
+
+| State        | Weight | Description                                     |
+| ------------ | ------ | ----------------------------------------------- |
+| `validated`  | 1.0    | Confirmed knowledge from files or promotion     |
+| `candidate`  | 0.7    | Extracted session knowledge awaiting validation |
+| `hypothesis` | 0.4    | Speculative or unverified                       |
+| `disputed`   | 0.3    | Contradicted by newer evidence                  |
+| `deprecated` | 0.1    | Superseded or outdated                          |
+
+The maintenance engine manages transitions — detecting staleness, expiring old entries, and promoting similar clusters.
+
+---
+
+## Replace the plugin
+
+The memory slot uses an exclusive assignment model. To use a custom memory plugin instead of the built-in one, assign it in config.
+
+```json title="opencode.json"
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": {
+    "slots": {
+      "memory": "my-memory-plugin"
+    }
+  }
+}
+```
+
+Or disable the built-in plugin entirely.
+
+```json title="opencode.json"
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": {
+    "entries": {
+      "opencode-memory": {
+        "enabled": false
+      }
+    }
+  }
+}
+```
+
+---
+
+## Understand what persists
+
+Here's a summary of what survives across different boundaries.
+
+| Data                       | Survives restart | Survives compaction    | Survives new session |
+| -------------------------- | ---------------- | ---------------------- | -------------------- |
+| Messages and tool results  | Yes              | Only post-boundary     | No                   |
+| Compaction summary         | Yes              | Is the boundary        | No                   |
+| Todo items                 | Yes              | Independent            | No                   |
+| Plan files                 | Yes              | Independent            | Yes (on disk)        |
+| `AGENTS.md` rules          | Yes              | Always re-injected     | Yes                  |
+| `MEMORY.md` knowledge      | Yes              | Always re-injected     | Yes                  |
+| Session summaries (SQLite) | Yes              | Independent            | Yes                  |
+| Skills                     | Yes              | Protected from pruning | Yes                  |

@@ -231,6 +231,7 @@ export default defineConfig({
             "rules",
             "agents",
             "models",
+            "memory",
             "themes",
             "keybinds",
             "commands",
@@ -266,7 +267,7 @@ export default defineConfig({
             "zh-CN": "开发",
             "zh-TW": "開發",
           },
-          items: ["sdk", "server", "plugins", "ecosystem"],
+          items: ["sdk", "server", "plugins", "memory-architecture", "ecosystem"],
         },
       ],
       components: {
