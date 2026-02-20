@@ -763,4 +763,66 @@ describe("memory commands", () => {
       expect(result.text).toContain("Embedding cache: 1 entries (3 dims)")
     })
   })
+
+  // =========================================================================
+  // Gap-fill: handleCommand edge cases
+  // =========================================================================
+
+  describe("handleCommand edge cases", () => {
+    test("inspect with empty ID shows usage", () => {
+      // "inspect " with trailing space but no actual ID — though args.slice("inspect ".length).trim() = ""
+      const result = handleCommand(store, "inspect ")
+      expect(result).not.toBeNull()
+      expect(result!.text).toContain("Usage")
+    })
+
+    test("chunks with invalid limit falls back to 25", () => {
+      store.upsertChunk(makeChunk("inv-limit", "text"))
+      const result = handleCommand(store, "chunks limit=abc")!
+      // Should not throw; limit falls back to 25
+      expect(result.text).toContain("Memory Chunks")
+    })
+
+    test("summaries with invalid limit falls back to 30", () => {
+      store.upsertSummary({
+        id: "s-inv",
+        session_id: "sess",
+        project_id: "p",
+        content: "text",
+        truth_state: "candidate",
+        created_at: Date.now(),
+      })
+      const result = handleCommand(store, "summaries abc")!
+      expect(result.text).toContain("Session Summaries")
+    })
+
+    test("entities overflow shows ...and N more", () => {
+      store.upsertChunk(makeChunk("ent-overflow", "text"))
+      // Create 35 unique entities so we exceed the 30-per-kind limit
+      const entities = Array.from({ length: 35 }, (_, i) => ({
+        kind: "technology" as const,
+        value: `tech_${String(i).padStart(2, "0")}`,
+      }))
+      store.upsertEntities("ent-overflow", entities)
+      const result = handleCommand(store, "entities")!
+      expect(result.text).toContain("...and 5 more")
+    })
+
+    test("embeddings with cacheDims=0 omits dims suffix", () => {
+      // Add cache entry with dims=0
+      store.cacheEmbedding({ hash: "h-no-dims", embedding: serialize([1]), model: "m", dims: 0, updated_at: 1 })
+      // Need a chunk so embeddings doesn't show N/A
+      store.upsertChunk(makeChunk("es-dim0", "text"))
+      const result = handleCommand(store, "embeddings")!
+      // Should show "1 entries" without "(0 dims)"
+      expect(result.text).toContain("1 entries")
+      expect(result.text).not.toContain("(0 dims)")
+    })
+
+    test("unknown command returns null", () => {
+      expect(handleCommand(store, "unknown_cmd")).toBeNull()
+      expect(handleCommand(store, "status")).toBeNull()
+      expect(handleCommand(store, "promote")).toBeNull()
+    })
+  })
 })

@@ -366,24 +366,32 @@ export async function run(params: {
 
   // A. Staleness detection
   if (mc.autoDeprecate) {
-    log.debug("maintain: detectStale starting")
-    const stale = detectStale(params.store, params.worktree)
-    report.staleDeprecated = stale.deprecated
-    report.staleDisputed = stale.disputed
-    log.debug("maintain: detectStale complete")
+    try {
+      log.debug("maintain: detectStale starting")
+      const stale = detectStale(params.store, params.worktree)
+      report.staleDeprecated = stale.deprecated
+      report.staleDisputed = stale.disputed
+      log.debug("maintain: detectStale complete")
+    } catch (err) {
+      log.warn("staleness detection failed", { error: String(err) })
+    }
   }
 
   // B. Summary lifecycle
-  log.debug("maintain: manageSummaries starting")
-  const summaryResult = await manageSummaries({
-    store: params.store,
-    provider: params.provider,
-    projectID: params.projectID,
-    config: params.config,
-  })
-  report.summariesDeleted = summaryResult.deleted
-  report.promoted = summaryResult.promoted
-  log.debug("maintain: manageSummaries complete")
+  try {
+    log.debug("maintain: manageSummaries starting")
+    const summaryResult = await manageSummaries({
+      store: params.store,
+      provider: params.provider,
+      projectID: params.projectID,
+      config: params.config,
+    })
+    report.summariesDeleted = summaryResult.deleted
+    report.promoted = summaryResult.promoted
+    log.debug("maintain: manageSummaries complete")
+  } catch (err) {
+    log.warn("summary management failed", { error: String(err) })
+  }
 
   // C. Model migration
   try {
@@ -397,9 +405,13 @@ export async function run(params: {
   // D. Contradiction detection is run per-entry (after extraction), not in bulk
 
   // E. Orphan cleanup
-  log.debug("maintain: cleanupDeprecated starting")
-  report.cleanedUp = cleanupDeprecated(params.store, mc.deprecatedCleanupDays)
-  log.debug("maintain: cleanupDeprecated complete")
+  try {
+    log.debug("maintain: cleanupDeprecated starting")
+    report.cleanedUp = cleanupDeprecated(params.store, mc.deprecatedCleanupDays)
+    log.debug("maintain: cleanupDeprecated complete")
+  } catch (err) {
+    log.warn("deprecated cleanup failed", { error: String(err) })
+  }
 
   // Standard GC (FTS optimize, cache prune, entity orphans)
   log.debug("maintain: gc starting")

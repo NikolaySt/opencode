@@ -135,6 +135,32 @@ describe("memory.config.resolve", () => {
     expect(cfg.sync.onSearch).toBe(false)
     expect(cfg.sync.onSessionStart).toBe(true) // default preserved
   })
+
+  test("injection.maxTokensPercent override", () => {
+    const cfg = resolve({ injection: { maxTokensPercent: 0.15 } })
+    expect(cfg.injection.maxTokensPercent).toBe(0.15)
+    expect(cfg.injection.enabled).toBe(true) // default preserved
+    expect(cfg.injection.maxTokens).toBe(2000) // default preserved
+  })
+
+  test("injection.maxTokensPercent is undefined by default", () => {
+    const cfg = resolve()
+    expect(cfg.injection.maxTokensPercent).toBeUndefined()
+  })
+
+  test("sync.watchDebounceMs defaults to 1500", () => {
+    const cfg = resolve()
+    expect(cfg.sync.watchDebounceMs).toBe(1500)
+  })
+
+  test("mutation isolation: returned config is independent", () => {
+    const cfg1 = resolve()
+    cfg1.search.maxResults = 999
+    cfg1.extraction.ignoredEntities.push("leak")
+    const cfg2 = resolve()
+    expect(cfg2.search.maxResults).toBe(8)
+    expect(cfg2.extraction.ignoredEntities).toEqual([])
+  })
 })
 
 // =========================================================================
@@ -605,5 +631,88 @@ describe("memory integration: store + extract + search", () => {
     expect(store.stats().summaries).toBe(3)
     expect(store.stats().chunks).toBe(3)
     expect(store.recentSummaries("p1", 10)).toHaveLength(3)
+  })
+
+  // =========================================================================
+  // Gap-fill: extract edge cases
+  // =========================================================================
+
+  test("LLM mode without generate function falls back to title mode", async () => {
+    const result = await extract({
+      store,
+      provider,
+      sessionID: "llm-no-gen",
+      projectID: "p1",
+      summary: "Important knowledge about architecture",
+      mode: "llm",
+      entityMode: "regex",
+      // no generate function provided
+    })
+    expect(result).toBe(true)
+    // Summary should be stored using raw summary (title mode fallback)
+    const summaries = store.recentSummaries("p1", 10)
+    const found = summaries.find((s) => s.id === "summary:llm-no-gen")
+    expect(found).toBeDefined()
+    expect(found!.content).toContain("architecture")
+  })
+
+  test("LLM mode with empty summary returns false", async () => {
+    const generate = async (_prompt: string) => "LLM response"
+    const result = await extract({
+      store,
+      provider,
+      sessionID: "llm-empty",
+      projectID: "p1",
+      summary: "   ",
+      mode: "llm",
+      entityMode: "regex",
+      generate,
+    })
+    expect(result).toBe(false)
+  })
+
+  test("LLM generate returning empty string falls back to raw summary", async () => {
+    const generate = async (_prompt: string) => ""
+    const result = await extract({
+      store,
+      provider,
+      sessionID: "llm-gen-empty",
+      projectID: "p1",
+      summary: "Fallback knowledge about patterns",
+      mode: "llm",
+      entityMode: "regex",
+      generate,
+    })
+    expect(result).toBe(true)
+    const summaries = store.recentSummaries("p1", 10)
+    const found = summaries.find((s) => s.id === "summary:llm-gen-empty")
+    expect(found).toBeDefined()
+    expect(found!.content).toContain("patterns")
+  })
+
+  test("entityMode llm uses LLM for entity extraction", async () => {
+    const generate = async (_prompt: string) => {
+      // Return entity JSON for entity extraction (not summary extraction since mode is title)
+      return JSON.stringify([
+        { kind: "technology", value: "graphql" },
+        { kind: "class", value: "QueryResolver" },
+      ])
+    }
+    const result = await extract({
+      store,
+      provider,
+      sessionID: "entity-llm",
+      projectID: "p1",
+      summary: "GraphQL QueryResolver class for API",
+      mode: "title",
+      entityMode: "llm",
+      generate,
+    })
+    expect(result).toBe(true)
+    const chunk = store.getChunk("summary:entity-llm")
+    expect(chunk).not.toBeNull()
+    const entities = store.entitiesForChunk("summary:entity-llm")
+    // LLM entity extraction should produce the entities from the generate function
+    expect(entities.length).toBeGreaterThan(0)
   })
 })

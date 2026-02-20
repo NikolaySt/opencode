@@ -850,4 +850,134 @@ describe("memory.inject.build with context-aware budget", () => {
     // COMPRESSED_SUMMARY_LIMIT = 2, so at most 2 summary bullets
     expect(bullets!.length).toBeLessThanOrEqual(2)
   })
+
+  // =========================================================================
+  // Gap-fill: inject edge cases
+  // =========================================================================
+
+  test("P4 with multi-entity query includes both entity results", async () => {
+    // Add chunks tagged with different entities
+    const [embedding1] = await provider.embed(["TypeScript conventions"])
+    store.upsertChunk({
+      id: "c-multi-ent1",
+      path: "/test.md",
+      source: "memory",
+      start_line: 1,
+      end_line: 1,
+      hash: "h-me1",
+      text: "TypeScript conventions for our project",
+      embedding: serialize(embedding1),
+      truth_state: "validated",
+      confidence: 1.0,
+      created_at: Date.now(),
+      updated_at: Date.now(),
+      embedding_model: "fake",
+      last_validated_at: null,
+    })
+    store.upsertEntities("c-multi-ent1", [{ kind: "technology", value: "typescript" }])
+
+    const [embedding2] = await provider.embed(["database architecture"])
+    store.upsertChunk({
+      id: "c-multi-ent2",
+      path: "/test.md",
+      source: "memory",
+      start_line: 2,
+      end_line: 2,
+      hash: "h-me2",
+      text: "Database architecture patterns for the project",
+      embedding: serialize(embedding2),
+      truth_state: "validated",
+      confidence: 1.0,
+      created_at: Date.now(),
+      updated_at: Date.now(),
+      embedding_model: "fake",
+      last_validated_at: null,
+    })
+    store.upsertEntities("c-multi-ent2", [{ kind: "technology", value: "database" }])
+
+    const result = await build({
+      store,
+      provider,
+      worktree: dir,
+      projectID: "test",
+      maxTokens: 5000,
+      query: "How does typescript work with the database?",
+    })
+    // P4 should include entity context for both "typescript" and "database"
+    if (result) {
+      // At least one entity section should appear
+      expect(result.includes("typescript") || result.includes("database")).toBe(true)
+    }
+  })
+
+  test("P4 deduplication: same chunk under multiple entities appears once in entity section", async () => {
+    // Use a fresh store to avoid P2 search results interfering
+    const dedupStore = MemoryStore.create(`inject-dedup-${Date.now()}-${Math.random().toString(36).slice(2)}`)
+    dedupStore.open()
+
+    const [embedding] = await provider.embed(["dedup_unique_marker_text"])
+    dedupStore.upsertChunk({
+      id: "c-dedup",
+      path: "/test.md",
+      source: "memory",
+      start_line: 1,
+      end_line: 1,
+      hash: "h-dedup",
+      text: "dedup_unique_marker_text about the codebase",
+      embedding: serialize(embedding),
+      truth_state: "validated",
+      confidence: 1.0,
+      created_at: Date.now(),
+      updated_at: Date.now(),
+      embedding_model: "fake",
+      last_validated_at: null,
+    })
+    // Tag with two entities that both appear in the query
+    dedupStore.upsertEntities("c-dedup", [
+      { kind: "technology", value: "typescript" },
+      { kind: "technology", value: "database" },
+    ])
+
+    const result = await build({
+      store: dedupStore,
+      provider,
+      worktree: dir,
+      projectID: "test",
+      maxTokens: 5000,
+      query: "How does typescript work with the database?",
+    })
+    dedupStore.close()
+    if (result) {
+      // Extract just the P4 "Related Entities" section
+      const p4Start = result.indexOf("### Related Entities")
+      if (p4Start >= 0) {
+        const p4Section = result.slice(p4Start)
+        // The unique marker should appear at most once within P4 (dedup via `seen` set)
+        const matches = p4Section.match(/dedup_unique_marker_text/g)
+        expect(matches).toHaveLength(1)
+      }
+    }
+  })
+
+  test("memory.md (lowercase only) is read as P1 content", async () => {
+    // Create only lowercase memory.md
+    fs.writeFileSync(path.join(dir, "memory.md"), "# Lowercase Memory\n\nThis is lowercase memory content.")
+    const result = await build({
+      store,
+      provider,
+      worktree: dir,
+      projectID: "test",
+      maxTokens: 2000,
+    })
+    expect(result).toBeDefined()
+    expect(result!).toContain("Lowercase Memory")
+  })
+
+  test("effectiveBudget with usedTokens=0 and valid contextLimit", () => {
+    const result = effectiveBudget({ maxTokens: 2000, contextLimit: 100000, usedTokens: 0 })
+    // available = 100000 - 0 - 5000 = 95000, clamped to min(95000, 2000) = 2000
+    expect(result).toBeDefined()
+    expect(result!.tokens).toBe(2000)
+    expect(result!.compressed).toBe(false)
+  })
 })

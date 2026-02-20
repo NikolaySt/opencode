@@ -499,3 +499,141 @@ describe("memory.tools.memorySearch entity kind inference", () => {
     expect(results.some((r) => r.id === "c-tech")).toBe(true)
   })
 })
+
+// =========================================================================
+// Gap-fill: pathGlob filter through tool.execute
+// =========================================================================
+
+describe("memory.tools.memorySearch pathGlob via tool.execute", () => {
+  let store: MemoryStore.Store
+  let provider: EmbeddingProvider
+
+  beforeEach(async () => {
+    store = MemoryStore.create(`tools-pathglob-${Date.now()}-${Math.random().toString(36).slice(2)}`)
+    store.open()
+    provider = fakeProvider()
+
+    const [embedding] = await provider.embed(["TypeScript auth handler"])
+    store.upsertChunk({
+      id: "c-auth",
+      path: "/src/auth/handler.ts",
+      source: "memory",
+      start_line: 1,
+      end_line: 1,
+      hash: "hash-c-auth",
+      text: "TypeScript auth handler implementation",
+      embedding: serialize(embedding),
+      truth_state: "validated",
+      confidence: 1.0,
+      created_at: Date.now(),
+      updated_at: Date.now(),
+      embedding_model: "fake",
+      last_validated_at: null,
+    })
+
+    const [embedding2] = await provider.embed(["TypeScript database code"])
+    store.upsertChunk({
+      id: "c-db",
+      path: "/src/db/store.ts",
+      source: "memory",
+      start_line: 1,
+      end_line: 1,
+      hash: "hash-c-db",
+      text: "TypeScript database store code",
+      embedding: serialize(embedding2),
+      truth_state: "validated",
+      confidence: 1.0,
+      created_at: Date.now(),
+      updated_at: Date.now(),
+      embedding_model: "fake",
+      last_validated_at: null,
+    })
+  })
+
+  afterEach(() => {
+    store.close()
+  })
+
+  test("pathGlob filter through tool.execute restricts by path", async () => {
+    const tool = memorySearch(store, provider)
+    const result = await tool.execute({ query: "TypeScript", pathGlob: "**/auth/*" }, ctx)
+    expect(result as string).toContain("auth")
+    expect(result as string).not.toContain("database")
+  })
+})
+
+// =========================================================================
+// Gap-fill: memoryGet boundary clamping
+// =========================================================================
+
+describe("memory.tools.memoryGet boundary clamping", () => {
+  let dir: string
+
+  beforeEach(() => {
+    dir = makeTmpDir()
+  })
+
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
+
+  test("from=0 is clamped to 1", async () => {
+    fs.writeFileSync(path.join(dir, "test.md"), "first\nsecond\nthird")
+    const tool = memoryGet(dir)
+    const result = await tool.execute({ path: "test.md", from: 0 }, ctx)
+    expect(result as string).toContain("1: first")
+  })
+
+  test("from=-5 is clamped to 1", async () => {
+    fs.writeFileSync(path.join(dir, "test.md"), "first\nsecond\nthird")
+    const tool = memoryGet(dir)
+    const result = await tool.execute({ path: "test.md", from: -5 }, ctx)
+    expect(result as string).toContain("1: first")
+  })
+
+  test("lines=0 is clamped to 1", async () => {
+    fs.writeFileSync(path.join(dir, "test.md"), "first\nsecond\nthird")
+    const tool = memoryGet(dir)
+    const result = await tool.execute({ path: "test.md", lines: 0 }, ctx)
+    const lineCount = (result as string).split("\n").filter((l) => /^\d+:/.test(l)).length
+    expect(lineCount).toBe(1)
+  })
+
+  test("from beyond end of file returns empty content", async () => {
+    fs.writeFileSync(path.join(dir, "test.md"), "first\nsecond")
+    const tool = memoryGet(dir)
+    const result = await tool.execute({ path: "test.md", from: 1000 }, ctx)
+    // Should indicate lines 1000- but have no numbered lines
+    const lineCount = (result as string).split("\n").filter((l) => /^\d+:/.test(l)).length
+    expect(lineCount).toBe(0)
+  })
+
+  test("truthState filter through tool.execute wiring", async () => {
+    const store2 = MemoryStore.create(`tools-truth-exec-${Date.now()}-${Math.random().toString(36).slice(2)}`)
+    store2.open()
+    const provider2 = fakeProvider()
+
+    const [embedding] = await provider2.embed(["TypeScript candidate info"])
+    store2.upsertChunk({
+      id: "c-cand",
+      path: "/test.md",
+      source: "memory",
+      start_line: 1,
+      end_line: 1,
+      hash: "hash-c-cand",
+      text: "TypeScript candidate info about patterns",
+      embedding: serialize(embedding),
+      truth_state: "candidate",
+      confidence: 0.7,
+      created_at: Date.now(),
+      updated_at: Date.now(),
+      embedding_model: "fake",
+      last_validated_at: null,
+    })
+
+    const tool = memorySearch(store2, provider2)
+    const result = await tool.execute({ query: "TypeScript patterns", truthState: "candidate" }, ctx)
+    expect(result as string).toContain("candidate")
+    store2.close()
+  })
+})

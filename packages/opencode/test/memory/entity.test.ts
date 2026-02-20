@@ -114,6 +114,17 @@ describe("memory.entity.extractLLM", () => {
     expect(values).toEqual(["react", "typescript"])
   })
 
+  test("fallback to regex passes ignored set", async () => {
+    const generate = async (_prompt: string): Promise<string> => {
+      throw new Error("API error")
+    }
+    const ignored = new Set(["typescript"])
+    const entities = await extractLLM("Uses typescript with react", generate, ignored)
+    // "typescript" should be filtered by the ignored set in the regex fallback
+    expect(entities.some((e) => e.value === "typescript")).toBe(false)
+    expect(entities.some((e) => e.value === "react")).toBe(true)
+  })
+
   test("returns empty for non-array JSON (object)", async () => {
     const generate = async (_prompt: string) => JSON.stringify({ kind: "technology", value: "redis" })
     const entities = await extractLLM("Uses typescript and react", generate)

@@ -59,6 +59,19 @@ describe("memory.embed.deserialize validation", () => {
   test("deserialize returns empty for zero-length buffer", () => {
     expect(deserialize(Buffer.alloc(0))).toEqual([])
   })
+
+  test("deserialize works with Uint8Array (bun:sqlite BLOB type)", () => {
+    // bun:sqlite returns Uint8Array for BLOB columns, not Buffer
+    const original = [1.5, -2.5, 3.14]
+    const buf = serialize(original)
+    // Convert Buffer to plain Uint8Array (strip Buffer prototype)
+    const uint8 = new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength)
+    const result = deserialize(uint8 as any)
+    expect(result).toHaveLength(3)
+    expect(result[0]).toBeCloseTo(1.5)
+    expect(result[1]).toBeCloseTo(-2.5)
+    expect(result[2]).toBeCloseTo(3.14)
+  })
 })
 
 describe("memory.search.rankToScore and recencyScore", () => {
@@ -711,5 +724,119 @@ describe("memory.search", () => {
     })
     // Should NOT include the legacy chunk
     expect(results.every((r) => r.id !== "legacy")).toBe(true)
+  })
+
+  test("disputed truth_state scores lower than candidate", async () => {
+    const [embedding] = await provider.embed(["TypeScript disputed info"])
+    store.upsertChunk({
+      id: "disputed1",
+      path: "/test.md",
+      source: "memory",
+      start_line: 1,
+      end_line: 1,
+      hash: "hash-disputed1",
+      text: "TypeScript disputed info",
+      embedding: serialize(embedding),
+      truth_state: "disputed",
+      confidence: 0.3,
+      created_at: Date.now(),
+      updated_at: Date.now(),
+      embedding_model: "fake-embed",
+      last_validated_at: null,
+    })
+
+    const results = await search({
+      store,
+      provider,
+      query: "TypeScript",
+      options: { minScore: 0 },
+    })
+    const candidate = results.find((r) => r.id === "c1") // truth_state: validated, weight 1.0
+    const disputed = results.find((r) => r.id === "disputed1") // weight 0.3
+    expect(candidate).toBeDefined()
+    expect(disputed).toBeDefined()
+    expect(candidate!.score).toBeGreaterThan(disputed!.score)
+  })
+
+  test("search with dateRange.to filter excludes future chunks", async () => {
+    const now = Date.now()
+    const [embedding] = await provider.embed(["TypeScript future"])
+    store.upsertChunk({
+      id: "future",
+      path: "/test.md",
+      source: "memory",
+      start_line: 1,
+      end_line: 1,
+      hash: "hash-future",
+      text: "TypeScript future info",
+      embedding: serialize(embedding),
+      truth_state: "validated",
+      confidence: 1.0,
+      created_at: now + 1_000_000,
+      updated_at: now + 1_000_000,
+      embedding_model: "fake-embed",
+      last_validated_at: null,
+    })
+
+    const results = await search({
+      store,
+      provider,
+      query: "TypeScript",
+      options: { dateRange: { to: now + 500 }, minScore: 0 },
+    })
+    expect(results.every((r) => r.id !== "future")).toBe(true)
+  })
+
+  test("search returns empty when provider returns empty embedding", async () => {
+    // Provider that returns empty array for embedding
+    const emptyProvider: EmbeddingProvider = {
+      async embed(_texts: string[]): Promise<number[][]> {
+        return [[]]
+      },
+      dimensions: () => 0,
+      model: () => "empty",
+    }
+
+    const results = await search({
+      store,
+      provider: emptyProvider,
+      query: "TypeScript",
+      options: { minScore: 0 },
+    })
+    expect(results).toHaveLength(0)
+  })
+
+  test("search with truthState as array filters correctly", async () => {
+    const [embedding] = await provider.embed(["TypeScript deprecated multi-state"])
+    store.upsertChunk({
+      id: "dep-arr",
+      path: "/test.md",
+      source: "memory",
+      start_line: 1,
+      end_line: 1,
+      hash: "hash-dep-arr",
+      text: "TypeScript deprecated multi-state test",
+      embedding: serialize(embedding),
+      truth_state: "deprecated",
+      confidence: 0.1,
+      created_at: Date.now(),
+      updated_at: Date.now(),
+      embedding_model: "fake-embed",
+      last_validated_at: null,
+    })
+
+    const results = await search({
+      store,
+      provider,
+      query: "TypeScript",
+      options: { truthState: ["validated", "deprecated"], minScore: 0 },
+    })
+    // Should include both validated (c1) and deprecated (dep-arr)
+    const states = new Set(results.map((r) => r.truthState))
+    expect(states.has("validated") || states.has("deprecated")).toBe(true)
+    // Should not include candidate-only chunks unless they also match
+    for (const r of results) {
+      expect(["validated", "deprecated"]).toContain(r.truthState)
+    }
   })
 })

@@ -1089,4 +1089,87 @@ describe("memory.store", () => {
   test("allSummaries returns empty when no summaries exist", () => {
     expect(store.allSummaries(50)).toEqual([])
   })
+
+  // =========================================================================
+  // Gap-fill: hypothesis truth state and concept entity kind
+  // =========================================================================
+
+  test("hypothesis truth_state round-trips correctly", () => {
+    store.upsertChunk(makeChunk("hypo-chunk", "hypothesis text", { truth_state: "hypothesis", confidence: 0.4 }))
+    const chunk = store.getChunk("hypo-chunk")
+    expect(chunk).not.toBeNull()
+    expect(chunk!.truth_state).toBe("hypothesis")
+    expect(chunk!.confidence).toBe(0.4)
+  })
+
+  test("concept entity kind round-trips correctly", () => {
+    store.upsertChunk(makeChunk("concept-chunk", "concept text"))
+    store.upsertEntities("concept-chunk", [{ kind: "concept", value: "immutability" }])
+    const entities = store.entitiesForChunk("concept-chunk")
+    expect(entities).toHaveLength(1)
+    expect(entities[0].kind).toBe("concept")
+    expect(entities[0].value).toBe("immutability")
+  })
+
+  test("searchByEntity with concept kind", () => {
+    store.upsertChunk(makeChunk("concept-search", "concept search text"))
+    store.upsertEntities("concept-search", [{ kind: "concept", value: "modularity" }])
+    const results = store.searchByEntity("concept", "modularity", 10)
+    expect(results).toHaveLength(1)
+    expect(results[0].id).toBe("concept-search")
+  })
+
+  // =========================================================================
+  // Gap-fill: closed-db guards for allEntities, embeddingStats, allSummaries
+  // =========================================================================
+
+  test("allEntities returns empty after close", () => {
+    store.upsertChunk(makeChunk("ent-close", "text"))
+    store.upsertEntities("ent-close", [{ kind: "function", value: "foo" }])
+    store.close()
+    expect(store.allEntities(100)).toEqual([])
+  })
+
+  test("embeddingStats returns zeros after close", () => {
+    store.upsertChunk(makeChunk("es-close", "text", { embedding: serialize([1, 2, 3]) }))
+    store.close()
+    const es = store.embeddingStats()
+    expect(es.total).toBe(0)
+    expect(es.withEmbedding).toBe(0)
+    expect(es.empty).toBe(0)
+    expect(es.cacheEntries).toBe(0)
+    expect(es.cacheDims).toBe(0)
+  })
+
+  test("allSummaries returns empty after close", () => {
+    store.upsertSummary({
+      id: "s-close",
+      session_id: "a",
+      project_id: "p",
+      content: "c",
+      truth_state: "candidate",
+      created_at: 1,
+    })
+    store.close()
+    expect(store.allSummaries(50)).toEqual([])
+  })
+
+  // =========================================================================
+  // Gap-fill: deleteSummary with non-existent ID does not throw
+  // =========================================================================
+
+  test("deleteSummary with non-existent id does not throw", () => {
+    expect(() => store.deleteSummary("nonexistent-summary")).not.toThrow()
+  })
+
+  // =========================================================================
+  // Gap-fill: deleteChunksForPath with zero matching chunks
+  // =========================================================================
+
+  test("deleteChunksForPath with no matching chunks is a no-op", () => {
+    store.upsertChunk(makeChunk("other-path", "text", { path: "/other.md" }))
+    store.deleteChunksForPath("/nonexistent.md")
+    // The other chunk should still exist
+    expect(store.getChunk("other-path")).not.toBeNull()
+  })
 })

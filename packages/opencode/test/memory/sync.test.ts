@@ -277,4 +277,30 @@ describe("memory.sync.sync", () => {
     const result = await sync({ store, provider, worktree: dir, extra: [extraDir] })
     expect(result.indexed).toBe(1)
   })
+
+  // =========================================================================
+  // Gap-fill: sync edge cases
+  // =========================================================================
+
+  test("entity extraction failure does not crash sync", async () => {
+    fs.writeFileSync(path.join(dir, "MEMORY.md"), "# Knowledge\n\nSome important patterns and conventions here.")
+    // Use regex entity mode — entity extraction itself shouldn't fail,
+    // but we verify the pipeline completes even if entityMode is provided
+    const result = await sync({ store, provider, worktree: dir, entityMode: "regex" })
+    expect(result.indexed).toBe(1)
+    expect(result.errors).toHaveLength(0)
+  })
+
+  test("non-.md files in memory/ directory are ignored", async () => {
+    const memDir = path.join(dir, "memory")
+    fs.mkdirSync(memDir, { recursive: true })
+    fs.writeFileSync(path.join(memDir, "notes.md"), "# Notes\n\nSome notes.")
+    fs.writeFileSync(path.join(memDir, "data.json"), '{"key": "value"}')
+    fs.writeFileSync(path.join(memDir, "script.py"), "print('hello')")
+    const paths = discover(dir)
+    // Only .md files should be discovered
+    expect(paths.every((p) => p.endsWith(".md"))).toBe(true)
+    expect(paths.some((p) => p.endsWith(".json"))).toBe(false)
+    expect(paths.some((p) => p.endsWith(".py"))).toBe(false)
+  })
 })

@@ -301,7 +301,11 @@ Text:
  * The caller provides a generate function so this module doesn't
  * depend on the provider system directly.
  */
-export async function extractLLM(text: string, generate: (prompt: string) => Promise<string>): Promise<Entity[]> {
+export async function extractLLM(
+  text: string,
+  generate: (prompt: string) => Promise<string>,
+  ignored?: Set<string>,
+): Promise<Entity[]> {
   try {
     const response = await generate(ENTITY_EXTRACTION_PROMPT + text)
     // Parse JSON from the response — handle markdown code blocks
@@ -321,7 +325,7 @@ export async function extractLLM(text: string, generate: (prompt: string) => Pro
     return unique(entities)
   } catch (err) {
     log.warn("LLM entity extraction failed, falling back to regex", { error: String(err) })
-    return extractRegex(text)
+    return extractRegex(text, ignored)
   }
 }
 
@@ -335,7 +339,7 @@ export async function extract(
   ignored?: Set<string>,
 ): Promise<Entity[]> {
   if (mode === "llm" && generate) {
-    const entities = await extractLLM(text, generate)
+    const entities = await extractLLM(text, generate, ignored)
     if (!ignored || ignored.size === 0) return entities
     const blocked = new Set([...ignored].map((v) => v.toLowerCase()))
     return entities.filter((e) => !blocked.has(e.value.toLowerCase()))

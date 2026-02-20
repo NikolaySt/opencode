@@ -116,7 +116,7 @@ export async function search(params: {
   // Step 2: Embed query
   log.debug("search: embedding query")
   const [queryEmbedding] = await params.provider.embed([params.query])
-  if (!queryEmbedding) return []
+  if (!queryEmbedding || queryEmbedding.length === 0) return []
   log.debug("search: query embedded")
 
   // Step 3: Vector search (brute-force cosine similarity on filtered set)
