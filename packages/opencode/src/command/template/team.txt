@@ -1,0 +1,7 @@
+The user wants to use a multi-agent team of AI specialists to work on a task.
+
+The task is: $ARGUMENTS
+
+Use the `team` tool now with the goal set to the task above. Do not attempt to do the work yourself — the team tool will handle everything by staffing specialists, assigning work, triggering reviews, and converging on a result.
+
+After the team tool returns, summarize the results for the user.

@@ -2,3 +2,10 @@ export { ControlAccountTable } from "../control/control.sql"
 export { SessionTable, MessageTable, PartTable, TodoTable, PermissionTable } from "../session/session.sql"
 export { SessionShareTable } from "../share/share.sql"
 export { ProjectTable } from "../project/project.sql"
+export {
+  TeamSessionTable,
+  WorkspaceTable,
+  AgentInstanceTable,
+  TeamMessageTable,
+  ReviewThreadTable,
+} from "../team/team.sql"

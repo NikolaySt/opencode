@@ -1,0 +1,14 @@
+Start a multi-agent team session to collaboratively solve a complex task.
+
+This tool creates a team of AI specialists (architect, developer, QA, security reviewer, etc.) managed by an orchestrator. The orchestrator decomposes the goal, staffs the right roles, assigns work, triggers peer reviews, and converges on a result.
+
+Use this tool when:
+- The task benefits from multiple specialized perspectives
+- The task involves architecture decisions, full-feature implementation, or security-sensitive work
+- You want structured review cycles between specialists
+
+The team runs autonomously through five phases: understanding → design → implementation → verification → complete.
+
+If the team gets stuck on a decision that requires user input, it will escalate and prompt the user directly.
+
+IMPORTANT: This tool runs a long-lived orchestration loop. It may take several minutes to complete depending on task complexity.

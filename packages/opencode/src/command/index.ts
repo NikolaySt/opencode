@@ -5,6 +5,7 @@ import { Instance } from "../project/instance"
 import { Identifier } from "../id/id"
 import PROMPT_INITIALIZE from "./template/initialize.txt"
 import PROMPT_REVIEW from "./template/review.txt"
+import PROMPT_TEAM from "./template/team.txt"
 import { MCP } from "../mcp"
 import { Skill } from "../skill"
 import * as ChatCommand from "./chat-command"
@@ -55,6 +56,7 @@ export namespace Command {
   export const Default = {
     INIT: "init",
     REVIEW: "review",
+    TEAM: "team",
   } as const
 
   const state = Instance.state(async () => {
@@ -79,6 +81,15 @@ export namespace Command {
         },
         subtask: true,
         hints: hints(PROMPT_REVIEW),
+      },
+      [Default.TEAM]: {
+        name: Default.TEAM,
+        description: "start a multi-agent team session for a task",
+        source: "command",
+        get template() {
+          return PROMPT_TEAM
+        },
+        hints: hints(PROMPT_TEAM),
       },
     }
 
