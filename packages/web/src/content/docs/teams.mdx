@@ -21,7 +21,21 @@ Run the `/team` command with a description of what you want done.
 /team Build a REST API for user management with auth, rate limiting, and tests
 ```
 
-The orchestrator takes over. It staffs the right specialists, decomposes the work, and drives the team through to completion. If the team gets stuck, it escalates to you.
+The orchestrator takes over. It staffs the right specialists, decomposes the work, and drives the team through to completion. If the team gets stuck on something it can't resolve, it prompts you for input.
+
+---
+
+### Understand the execution flow
+
+Here's what happens when you type `/team`:
+
+1. The command system replaces `$ARGUMENTS` with your input and sends it to the LLM as a user message.
+2. The LLM sees the instruction to call the `team` tool and invokes it with your goal.
+3. The `team` tool calls `Team.start()`, which creates a session, an orchestrator, and a workspace.
+4. The orchestrator runs in a loop — staffing agents, assigning tasks, triggering reviews, and advancing phases.
+5. If the team needs your input, the tool uses the question system to prompt you directly in the TUI.
+6. When the orchestrator signals completion, the tool formats the results and returns them to the LLM.
+7. The LLM summarizes the results for you.
 
 ---
 
@@ -53,7 +67,39 @@ Everything is persisted in SQLite across 5 tables with cascade deletes.
 | `team_message`   | Communication graph                | `from_role`, `to_role`, `type`, `content`, `ref_ids` (JSON)  |
 | `review_thread`  | Review lifecycle tracking          | `author_role`, `reviewer_role`, `status`, `round`            |
 
-Each table has a foreign key to `team_session` with `ON DELETE CASCADE`. Compound indexes cover the common query patterns.
+Each table has a foreign key to `team_session` with `ON DELETE CASCADE`. Compound indexes cover the common query patterns. The migration runs automatically on startup.
+
+---
+
+### Know the source layout
+
+```txt frame="none"
+src/team/
+├── index.ts              Team namespace (create, start, cancel, status)
+├── team.sql.ts           Drizzle schema (5 tables)
+├── orchestrator.ts       Orchestrator loop (11 actions, phase budgets)
+├── execute.ts            Execution bridge (context building, output parsing)
+├── roster.ts             Agent lifecycle
+├── workspace.ts          Shared state CRUD
+├── message.ts            Team message graph (10 types)
+├── review.ts             Review thread CRUD
+├── review-loop.ts        Critique → revision cycle (max 3 rounds)
+├── roles.ts              9 built-in role templates + signal matching
+├── hooks.ts              14 bus events for plugins
+├── sharing/
+│   ├── strategy.ts       SharingStrategy interface + resolve()
+│   ├── selective.ts      Default: filtered context per agent
+│   ├── hierarchical.ts   Orchestrator-curated context
+│   └── broadcast.ts      Full visibility for all agents
+└── prompt/               12 prompt template files (.txt)
+
+src/tool/
+├── team.ts               TeamTool — wraps Team.start() as LLM-callable tool
+└── team.txt              Tool description
+
+src/command/template/
+└── team.txt              /team command template ($ARGUMENTS → tool call)
+```
 
 ---
 
@@ -72,7 +118,7 @@ Every team session flows through statuses and phases.
 | `complete`     | All work is done                         |
 | `cancelled`    | Session was cancelled                    |
 
-When the orchestrator uses the `escalate` action, the session flips to `waiting_user` until you answer.
+When the orchestrator uses the `escalate` action, the session flips to `waiting_user`. You'll see a question prompt in the TUI. After you answer, the session returns to `active`.
 
 ---
 
@@ -108,7 +154,7 @@ Nine built-in role templates are available. The orchestrator picks the right one
 | **UX reviewer**            | Usability, accessibility, WCAG compliance        | Yes         |
 | **Documentation writer**   | Technical writing, API docs, user guides         | Yes         |
 
-Each template defines a system prompt, workspace read/write permissions, and expertise tags. Every agent gets its own OpenCode session.
+Each template defines a system prompt, workspace read/write permissions, and expertise tags. Every spawned agent gets its own OpenCode session linked to the `session` table.
 
 ---
 
@@ -164,7 +210,7 @@ Actions are parsed from JSON, optionally wrapped in a markdown code block. Inval
 
 ---
 
-### Know the team composition guidelines
+### Know the composition guidelines
 
 The orchestrator follows sizing heuristics from its system prompt.
 
@@ -271,7 +317,7 @@ Questions are tracked with routing and status.
 }
 ```
 
-The orchestrator uses the `route` action to assign a question to the right specialist, then automatically assigns that agent to answer it.
+The orchestrator uses the `route` action to assign a question to the right specialist, then assigns that agent to answer it.
 
 ---
 
@@ -353,7 +399,7 @@ The orchestrator can mediate escalated reviews using the `mediate` action, which
 
 ---
 
-### Know the prompts
+### Know the review prompts
 
 The review system uses two dedicated prompt templates.
 
@@ -475,11 +521,24 @@ The orchestrator prompt is the most critical — it defines the action format, t
 
 ## Use the API
 
-The `Team` namespace exposes four functions for programmatic use.
+The team feature is primarily accessed via the `/team` command. For programmatic use, the `Team` namespace and `team` tool are also available.
 
 ---
 
-### Create and run
+### Know the tool
+
+The `team` tool is registered in the tool registry and callable by any LLM agent. It accepts two parameters.
+
+| Parameter          | Type   | Required | Default       | Description                                 |
+| ------------------ | ------ | -------- | ------------- | ------------------------------------------- |
+| `goal`             | string | Yes      | —             | The task for the team                       |
+| `sharing_strategy` | enum   | No       | `"selective"` | `selective`, `hierarchical`, or `broadcast` |
+
+When the team needs user input (via the `escalate` action), the tool uses the question system to prompt you directly in the TUI. The tool returns a formatted summary with the final phase, team roster, and recent activity.
+
+---
+
+### Call start directly
 
 `Team.start()` creates a session and runs the orchestrator loop to completion.
 
@@ -488,7 +547,6 @@ const result = await Team.start({
   goal: "Build a REST API with auth",
   sharingStrategy: "selective",
   onEscalate: async (question) => {
-    // Return the user's answer
     return "Use JWT with httpOnly cookies"
   },
   onStatus: (message) => console.log(message),
@@ -499,11 +557,11 @@ const result = await Team.start({
 // result.summary — completion summary string
 ```
 
-The `onEscalate` callback is required. It's called when the orchestrator uses the `escalate` action. The session status flips to `waiting_user` until you return an answer.
+The `onEscalate` callback is called when the orchestrator uses the `escalate` action. The session status flips to `waiting_user` until you return an answer.
 
 ---
 
-### Inspect a running session
+### Inspect a session
 
 `Team.status()` returns the current state of a team session.
 
@@ -525,6 +583,62 @@ const status = Team.status(teamSessionID)
 ```ts
 Team.cancel(teamSessionID)
 ```
+
+---
+
+## Verify the feature
+
+To test the team feature end-to-end, follow these steps.
+
+---
+
+### Restart the server
+
+You need to restart the OpenCode server and TUI client after the code changes. The restart picks up:
+
+- The new `team` tool registration in the tool registry
+- The database migration that creates the 5 team tables
+- The updated `/team` command template
+
+---
+
+### Run a test prompt
+
+Open a project in the TUI and type:
+
+```txt frame="none"
+/team Build a simple utility function that validates email addresses with tests
+```
+
+---
+
+### Know what to expect
+
+Watch for these steps in the output:
+
+1. **Tool call** — The LLM should call the `team` tool with your goal
+2. **Orchestrator staffing** — The orchestrator should spawn agents (likely Architect + Developer + QA)
+3. **Phase progression** — The session should move through understanding → design → implementation → verification → complete
+4. **Review cycles** — You may see critique → revision exchanges between agents
+5. **Completion** — A summary with the team roster and recent activity
+
+If the team needs your input, you'll see a question prompt in the TUI. Answer it and the team continues.
+
+:::caution
+The team session may take several minutes depending on task complexity and model speed. Each agent runs its own LLM calls sequentially through the orchestrator loop.
+:::
+
+---
+
+### Check the database
+
+After a session completes, you can verify the data was persisted by looking at the tables:
+
+- `team_session` — One row with your goal, final phase, and status
+- `agent_instance` — One row per agent that was spawned
+- `team_message` — The full communication history
+- `workspace` — 8 rows (one per section) with the final state
+- `review_thread` — One row per review that was triggered
 
 ---
 
@@ -567,7 +681,7 @@ One test shows as "fail" on Windows due to a known `EBUSY` file cleanup issue in
 
 ### Know what's not tested
 
-Functions that call `SessionPrompt.prompt()` cannot be unit tested because they require a real LLM provider. These are:
+Functions that call `SessionPrompt.prompt()` can't be unit tested because they need a real LLM provider. These are:
 
 - `Execute.run()` — runs an agent against the LLM
 - `Orchestrator.run()` — the main orchestrator loop
@@ -579,10 +693,10 @@ This follows the project's testing philosophy: avoid mocks, test real implementa
 
 ---
 
-### Run a single test file
+### Run a single file
 
 ```bash
 bun test test/team/parse-output.test.ts
 ```
 
-All tests use the `Instance.provide({ directory, fn })` pattern for database access, with `test/preload.ts` for isolation. No mocks are used — tests run against real SQLite with real migrations.
+All tests use the `Instance.provide({ directory, fn })` pattern for database access, with `test/preload.ts` for isolation. No mocks — tests run against real SQLite with real migrations.
