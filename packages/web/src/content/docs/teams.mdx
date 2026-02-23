@@ -1,0 +1,255 @@
+---
+title: Teams
+description: Multi-agent collaboration for complex tasks.
+---
+
+Teams let multiple AI specialists collaborate on a single goal. Instead of one agent doing everything, an orchestrator staffs a team, assigns work, triggers peer reviews, and converges on a result.
+
+:::tip
+Use teams for complex tasks that benefit from specialized perspectives — architecture decisions, full-feature implementation, or security-sensitive work.
+:::
+
+Teams run alongside the regular single-agent mode. Your existing sessions and workflows are unaffected.
+
+---
+
+## Start a session
+
+Run the `/team` command with a description of what you want done.
+
+```txt frame="none"
+/team Build a REST API for user management with auth, rate limiting, and tests
+```
+
+The orchestrator takes it from here. It will staff the right specialists, decompose the work, and drive the team through to completion.
+
+---
+
+## Know the architecture
+
+A team session has five layers that work together.
+
+| Layer            | What it does                                                    |
+| ---------------- | --------------------------------------------------------------- |
+| **Orchestrator** | Drives the loop — staffs agents, assigns tasks, advances phases |
+| **Roster**       | Agent lifecycle — spawn, retire, track status                   |
+| **Workspace**    | Shared state — goal, plan, decisions, artifacts, questions      |
+| **Messages**     | Typed communication graph between agents                        |
+| **Reviews**      | Critique → revision loops with auto-escalation                  |
+
+The orchestrator is the only agent that sees the full picture. Individual specialists see a filtered view based on the sharing strategy.
+
+---
+
+## Understand the phases
+
+Every team session moves through five phases. The orchestrator controls transitions.
+
+| Phase              | Budget | Purpose                                    |
+| ------------------ | ------ | ------------------------------------------ |
+| **Understanding**  | 10     | Analyze the goal, clarify requirements     |
+| **Design**         | 15     | Architect the solution, make key decisions |
+| **Implementation** | 30     | Build it — code, configs, migrations       |
+| **Verification**   | 15     | Review, test, fix issues                   |
+| **Complete**       | —      | Wrap up and report results                 |
+
+Budgets are measured in orchestrator steps. If a phase exceeds its budget, the orchestrator auto-advances to the next one.
+
+---
+
+## Know the roles
+
+Nine built-in role templates are available. The orchestrator picks the right ones based on your goal.
+
+| Role                       | Expertise                                        |
+| -------------------------- | ------------------------------------------------ |
+| **Architect**              | System design, patterns, technical decisions     |
+| **Developer**              | Implementation, code quality, debugging          |
+| **QA**                     | Testing, verification, edge cases                |
+| **Security reviewer**      | Vulnerabilities, auth patterns, input validation |
+| **Performance specialist** | Optimization, profiling, scalability             |
+| **Database specialist**    | Schema design, migrations, query optimization    |
+| **DevOps**                 | Deployment, CI/CD, infrastructure                |
+| **UX reviewer**            | Usability, accessibility, WCAG compliance        |
+| **Documentation writer**   | Technical writing, API docs, user guides         |
+
+---
+
+### Use signal detection
+
+Some roles are auto-suggested through signal detection. When an agent's output mentions terms like "security", "vulnerability", or "injection", the system suggests spawning a security reviewer.
+
+Roles without signals — architect and developer — are never auto-suggested. The orchestrator must explicitly staff them.
+
+---
+
+### Register custom roles
+
+You can register your own role templates programmatically.
+
+```ts title="custom-role.ts"
+import { Roles } from "./team/roles"
+
+Roles.register({
+  role: "api-designer",
+  prompt: "You are an API design specialist...",
+  description: "REST/GraphQL API design and consistency",
+  expertise: ["api design", "REST", "GraphQL", "OpenAPI"],
+  workspaceRead: ["goal", "constraints", "plan", "decisions"],
+  workspaceWrite: ["artifacts", "questions"],
+  signals: ["api", "endpoint", "REST", "GraphQL", "OpenAPI"],
+})
+```
+
+---
+
+## Choose a sharing strategy
+
+Sharing strategies control what each agent can see and how their outputs propagate. Set the strategy when starting a team session.
+
+---
+
+### Use selective
+
+The default strategy. Each agent sees its own workspace slice, a summary of the full workspace, and messages relevant to its role. Good balance of focus and awareness.
+
+---
+
+### Use hierarchical
+
+The orchestrator curates what each agent sees. Agents only receive context that the orchestrator explicitly includes in their assignment. Best for sensitive tasks where you want tight information control.
+
+---
+
+### Use broadcast
+
+Every agent sees the full workspace state. Maximum visibility, but noisier context. Use this for small teams where everyone needs the full picture.
+
+---
+
+## Understand reviews
+
+The review protocol ensures quality through structured critique-revision loops.
+
+1. The orchestrator triggers a review by pairing an author with a reviewer.
+2. The reviewer critiques the artifact using `[CRITIQUE]` and `[APPROVED]` tags.
+3. If not approved, the author revises and resubmits.
+4. This repeats for up to 3 rounds.
+5. If the review doesn't converge, it auto-escalates to the orchestrator for mediation.
+
+:::note
+The orchestrator can mediate escalated reviews by recording a decision and force-approving the review thread.
+:::
+
+---
+
+## Know the orchestrator actions
+
+The orchestrator drives the team by emitting structured JSON actions. Here are all 11.
+
+| Action     | Purpose                                             |
+| ---------- | --------------------------------------------------- |
+| `staff`    | Spawn multiple agents and assign initial tasks      |
+| `assign`   | Give a task to an existing agent                    |
+| `spawn`    | Add a single new specialist to the roster           |
+| `retire`   | Remove an agent that's no longer needed             |
+| `route`    | Forward a question from one agent to another        |
+| `decide`   | Record an architectural or design decision          |
+| `escalate` | Ask the user a question when the team is stuck      |
+| `advance`  | Move to the next phase                              |
+| `review`   | Trigger a review loop between author and reviewer   |
+| `mediate`  | Resolve an escalated review with a binding decision |
+| `complete` | End the session with a summary                      |
+
+---
+
+## Use the workspace
+
+The workspace is shared state organized into 8 sections.
+
+| Section        | Content                                    |
+| -------------- | ------------------------------------------ |
+| `goal`         | The user's original request                |
+| `constraints`  | Boundaries and requirements                |
+| `plan`         | Architecture and task breakdown            |
+| `tasks`        | Individual work items with status          |
+| `decisions`    | Approved decisions with rationale          |
+| `questions`    | Open and answered questions between agents |
+| `artifacts`    | Code, configs, and other outputs           |
+| `agent_states` | Per-agent working state                    |
+
+Each agent has read and write permissions for specific sections, defined by its role template.
+
+---
+
+## Listen to events
+
+Teams emit 14 events that you can subscribe to in [plugins](/docs/plugins).
+
+```ts title=".opencode/plugins/team-logger.ts"
+import type { Plugin } from "@opencode-ai/plugin"
+
+export const TeamLogger: Plugin = async ({ client }) => {
+  return {
+    event: async ({ event }) => {
+      if (event.type === "team.completed") {
+        await client.app.log({
+          body: {
+            service: "team-logger",
+            level: "info",
+            message: `Team completed: ${event.properties.summary}`,
+          },
+        })
+      }
+    },
+  }
+}
+```
+
+---
+
+### Review the event list
+
+**Session lifecycle:**
+
+- `team.created` — New team session started
+- `team.updated` — Session status changed
+- `team.completed` — Session finished with summary
+
+**Orchestrator:**
+
+- `team.phase_changed` — Phase transition
+- `team.decision` — Decision recorded
+- `team.escalated` — Question escalated to user
+
+**Agent lifecycle:**
+
+- `team.agent.spawned` — New agent joined the roster
+- `team.agent.retired` — Agent removed from the roster
+- `team.agent.updated` — Agent status changed
+
+**Communication:**
+
+- `team.message` — Message sent between agents
+
+**Workspace:**
+
+- `workspace.updated` — Workspace section changed
+
+**Reviews:**
+
+- `team.review.started` — Review thread created
+- `team.review.completed` — Review approved
+- `team.review.escalated` — Review hit max rounds
+
+---
+
+## Run the tests
+
+The team module has a comprehensive test suite with 396 passing tests across 16 files.
+
+```bash
+bun test test/team/
+```
+
+Tests cover schema round-trips, workspace CRUD, roster lifecycle, message routing, role matching, sharing strategies, output parsing, review extraction, and orchestrator utilities. Functions that call the LLM (like `Execute.run` and `Orchestrator.run`) are not unit tested — they require integration testing with a real provider.
