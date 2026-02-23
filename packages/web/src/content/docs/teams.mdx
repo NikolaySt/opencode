@@ -3,7 +3,7 @@ title: Teams
 description: Multi-agent collaboration for complex tasks.
 ---
 
-Teams let multiple AI specialists collaborate on a single goal. Instead of one agent doing everything, an orchestrator staffs a team, assigns work, triggers peer reviews, and converges on a result.
+Teams let multiple AI specialists collaborate on a single goal. An orchestrator staffs a team, assigns work, triggers peer reviews, and converges on a result — all autonomously.
 
 :::tip
 Use teams for complex tasks that benefit from specialized perspectives — architecture decisions, full-feature implementation, or security-sensitive work.
@@ -21,7 +21,7 @@ Run the `/team` command with a description of what you want done.
 /team Build a REST API for user management with auth, rate limiting, and tests
 ```
 
-The orchestrator takes it from here. It will staff the right specialists, decompose the work, and drive the team through to completion.
+The orchestrator takes over. It staffs the right specialists, decomposes the work, and drives the team through to completion. If the team gets stuck, it escalates to you.
 
 ---
 
@@ -32,28 +32,63 @@ A team session has five layers that work together.
 | Layer            | What it does                                                    |
 | ---------------- | --------------------------------------------------------------- |
 | **Orchestrator** | Drives the loop — staffs agents, assigns tasks, advances phases |
-| **Roster**       | Agent lifecycle — spawn, retire, track status                   |
+| **Roster**       | Agent lifecycle — spawn, retire, track status and metrics       |
 | **Workspace**    | Shared state — goal, plan, decisions, artifacts, questions      |
 | **Messages**     | Typed communication graph between agents                        |
 | **Reviews**      | Critique → revision loops with auto-escalation                  |
 
-The orchestrator is the only agent that sees the full picture. Individual specialists see a filtered view based on the sharing strategy.
+The orchestrator is the only agent that sees the full picture. Individual specialists see a filtered view based on the [sharing strategy](#choose-a-sharing-strategy).
 
 ---
 
-## Understand the phases
+### Review the data model
 
-Every team session moves through five phases. The orchestrator controls transitions.
+Everything is persisted in SQLite across 5 tables with cascade deletes.
 
-| Phase              | Budget | Purpose                                    |
-| ------------------ | ------ | ------------------------------------------ |
-| **Understanding**  | 10     | Analyze the goal, clarify requirements     |
-| **Design**         | 15     | Architect the solution, make key decisions |
-| **Implementation** | 30     | Build it — code, configs, migrations       |
-| **Verification**   | 15     | Review, test, fix issues                   |
-| **Complete**       | —      | Wrap up and report results                 |
+| Table            | Purpose                            | Key columns                                                  |
+| ---------------- | ---------------------------------- | ------------------------------------------------------------ |
+| `team_session`   | One row per team session           | `goal`, `phase`, `status`, `sharing_strategy`                |
+| `workspace`      | Shared state sections (8 per team) | `section`, `content` (JSON), `version`, `last_updated_by`    |
+| `agent_instance` | One row per spawned agent          | `role`, `expertise` (JSON), `relationships` (JSON), `status` |
+| `team_message`   | Communication graph                | `from_role`, `to_role`, `type`, `content`, `ref_ids` (JSON)  |
+| `review_thread`  | Review lifecycle tracking          | `author_role`, `reviewer_role`, `status`, `round`            |
 
-Budgets are measured in orchestrator steps. If a phase exceeds its budget, the orchestrator auto-advances to the next one.
+Each table has a foreign key to `team_session` with `ON DELETE CASCADE`. Compound indexes cover the common query patterns.
+
+---
+
+## Understand the lifecycle
+
+Every team session flows through statuses and phases.
+
+---
+
+### Track the status
+
+| Status         | Meaning                                  |
+| -------------- | ---------------------------------------- |
+| `active`       | Team is working                          |
+| `waiting_user` | Orchestrator escalated a question to you |
+| `complete`     | All work is done                         |
+| `cancelled`    | Session was cancelled                    |
+
+When the orchestrator uses the `escalate` action, the session flips to `waiting_user` until you answer.
+
+---
+
+### Move through phases
+
+Every session progresses through five phases. The orchestrator controls transitions.
+
+| Phase            | Step budget | Purpose                                    |
+| ---------------- | ----------- | ------------------------------------------ |
+| `understanding`  | 10          | Analyze the goal, clarify requirements     |
+| `design`         | 15          | Architect the solution, make key decisions |
+| `implementation` | 30          | Build it — code, configs, migrations       |
+| `verification`   | 15          | Review, test, fix issues                   |
+| `complete`       | —           | Wrap up and report results                 |
+
+Budgets are measured in orchestrator steps. If a phase exceeds its budget, the orchestrator auto-advances to the next one. The total step limit across all phases is 100.
 
 ---
 
@@ -61,25 +96,27 @@ Budgets are measured in orchestrator steps. If a phase exceeds its budget, the o
 
 Nine built-in role templates are available. The orchestrator picks the right ones based on your goal.
 
-| Role                       | Expertise                                        |
-| -------------------------- | ------------------------------------------------ |
-| **Architect**              | System design, patterns, technical decisions     |
-| **Developer**              | Implementation, code quality, debugging          |
-| **QA**                     | Testing, verification, edge cases                |
-| **Security reviewer**      | Vulnerabilities, auth patterns, input validation |
-| **Performance specialist** | Optimization, profiling, scalability             |
-| **Database specialist**    | Schema design, migrations, query optimization    |
-| **DevOps**                 | Deployment, CI/CD, infrastructure                |
-| **UX reviewer**            | Usability, accessibility, WCAG compliance        |
-| **Documentation writer**   | Technical writing, API docs, user guides         |
+| Role                       | Expertise                                        | Has signals |
+| -------------------------- | ------------------------------------------------ | ----------- |
+| **Architect**              | System design, patterns, technical decisions     | No          |
+| **Developer**              | Implementation, code quality, debugging          | No          |
+| **QA**                     | Testing, verification, edge cases                | Yes         |
+| **Security reviewer**      | Vulnerabilities, auth patterns, input validation | Yes         |
+| **Performance specialist** | Optimization, profiling, scalability             | Yes         |
+| **Database specialist**    | Schema design, migrations, query optimization    | Yes         |
+| **DevOps**                 | Deployment, CI/CD, infrastructure                | Yes         |
+| **UX reviewer**            | Usability, accessibility, WCAG compliance        | Yes         |
+| **Documentation writer**   | Technical writing, API docs, user guides         | Yes         |
+
+Each template defines a system prompt, workspace read/write permissions, and expertise tags. Every agent gets its own OpenCode session.
 
 ---
 
-### Use signal detection
+### Understand signals
 
-Some roles are auto-suggested through signal detection. When an agent's output mentions terms like "security", "vulnerability", or "injection", the system suggests spawning a security reviewer.
+Roles with signals are auto-suggested through signal detection. When an agent's output mentions terms like "security", "vulnerability", or "injection", the system suggests spawning a security reviewer.
 
-Roles without signals — architect and developer — are never auto-suggested. The orchestrator must explicitly staff them.
+A role needs at least 2 signal hits to be suggested. Roles without signals — architect and developer — are never auto-suggested. The orchestrator must explicitly staff them.
 
 ---
 
@@ -101,29 +138,187 @@ Roles.register({
 })
 ```
 
+The `workspaceRead` and `workspaceWrite` arrays control which workspace sections the agent can access. The `signals` array drives auto-suggestion.
+
+---
+
+## Know the actions
+
+The orchestrator drives the team by emitting one JSON action per turn. There are 11 actions.
+
+| Action     | Target field         | Purpose                                             |
+| ---------- | -------------------- | --------------------------------------------------- |
+| `staff`    | `roles[]`            | Spawn multiple agents and assign initial tasks      |
+| `assign`   | `role`               | Give a task to an existing agent                    |
+| `spawn`    | `role`               | Add a single new specialist to the roster           |
+| `retire`   | `role`               | Remove an agent that's no longer needed             |
+| `route`    | `from`, `to`         | Forward a question from one agent to another        |
+| `decide`   | —                    | Record an architectural or design decision          |
+| `escalate` | —                    | Ask the user a question when the team is stuck      |
+| `advance`  | `phase`              | Move to the next phase                              |
+| `review`   | `author`, `reviewer` | Trigger a review loop between two agents            |
+| `mediate`  | `review_id`          | Resolve an escalated review with a binding decision |
+| `complete` | —                    | End the session with a summary                      |
+
+Actions are parsed from JSON, optionally wrapped in a markdown code block. Invalid actions are retried.
+
+---
+
+### Know the team composition guidelines
+
+The orchestrator follows sizing heuristics from its system prompt.
+
+- **Simple bug fix**: Developer + QA (2 agents)
+- **Feature addition**: Architect + Developer + QA (3 agents)
+- **Security-sensitive**: add Security Reviewer
+- **Performance-critical**: add Performance Specialist
+- **Database changes**: add Database Specialist
+
+The orchestrator starts minimal and spawns more agents as needed.
+
+---
+
+## Understand communication
+
+Agents communicate through typed messages stored in the `team_message` table. There are 10 message types.
+
+| Type            | Purpose                                         |
+| --------------- | ----------------------------------------------- |
+| `proposal`      | Agent proposes a design or approach             |
+| `critique`      | Reviewer critiques an artifact                  |
+| `question`      | Agent asks another agent a question             |
+| `answer`        | Agent answers a question                        |
+| `decision`      | Decision recorded by orchestrator               |
+| `handoff`       | Orchestrator assigns work to an agent           |
+| `status`        | Status update (phase change, completion, error) |
+| `artifact`      | Code, config, or other output                   |
+| `spawn_request` | Agent or system requests spawning a specialist  |
+| `escalation`    | Question escalated to user or orchestrator      |
+
+Messages can be targeted (agent-to-agent) or broadcast (to the whole team). Each message can carry `ref_ids` linking to review threads and `workspace_mutations` describing state changes.
+
+---
+
+### Know the output tags
+
+Agents use tag-based structured output. The execution layer parses these tags from the LLM response.
+
+| Tag                | Extracted to              | Purpose                         |
+| ------------------ | ------------------------- | ------------------------------- |
+| `[PROPOSAL]`       | `proposals[]`             | Design or architecture proposal |
+| `[QUESTION: role]` | `questions[]`             | Ask a specific agent a question |
+| `[CONCERN: topic]` | `concerns[]`              | Flag a concern for the team     |
+| `[ARTIFACT]`       | `artifacts[]`             | Code, config, or deliverable    |
+| `[SPAWN: role]`    | `spawnRequests[]`         | Request a specialist be added   |
+| `[CRITIQUE]`       | `critiques[]`             | Review feedback on an artifact  |
+| `[COMPLETE]`       | `complete` flag + summary | Agent signals task is done      |
+| `[APPROVED]`       | `approved` flag           | Reviewer approves the artifact  |
+
+Tags are case-insensitive. Each tag's content extends to the next tag or end of text.
+
+---
+
+## Use the workspace
+
+The workspace is shared state organized into 8 sections, initialized when a team session is created.
+
+| Section        | Type   | Initial value       | Content                         |
+| -------------- | ------ | ------------------- | ------------------------------- |
+| `goal`         | string | User's request      | The original task description   |
+| `constraints`  | array  | `[]`                | Boundaries and requirements     |
+| `plan`         | object | `{status: "draft"}` | Architecture and task breakdown |
+| `tasks`        | array  | `[]`                | Work items with status tracking |
+| `decisions`    | array  | `[]`                | Decisions with rationale        |
+| `questions`    | array  | `[]`                | Open and answered questions     |
+| `artifacts`    | object | `{}`                | Code, configs, and outputs      |
+| `agent_states` | object | `{}`                | Per-agent working state         |
+
+Each section is versioned and tracks who last updated it. The workspace supports `get`, `set`, `append`, and `remove` operations.
+
+---
+
+### Track decisions
+
+Decisions have a structured format with rationale and alternatives.
+
+```json
+{
+  "id": "workspace_01jnb...",
+  "description": "Use JWT with httpOnly cookies",
+  "rationale": "Stateless, works with CDN, secure against XSS",
+  "alternatives": ["Session-based auth", "OAuth tokens in localStorage"],
+  "made_by": "architect",
+  "status": "approved",
+  "timestamp": 1740067200000
+}
+```
+
+The orchestrator records decisions via the `decide` action. Review approvals also create decision entries.
+
+---
+
+### Route questions
+
+Questions are tracked with routing and status.
+
+```json
+{
+  "id": "workspace_01jnb...",
+  "question": "Should we use separate tables for credentials?",
+  "asked_by": "developer",
+  "routed_to": "architect",
+  "status": "open"
+}
+```
+
+The orchestrator uses the `route` action to assign a question to the right specialist, then automatically assigns that agent to answer it.
+
 ---
 
 ## Choose a sharing strategy
 
-Sharing strategies control what each agent can see and how their outputs propagate. Set the strategy when starting a team session.
+Sharing strategies control what each agent sees and how their outputs propagate back to the workspace. The default is `selective`.
 
 ---
 
 ### Use selective
 
-The default strategy. Each agent sees its own workspace slice, a summary of the full workspace, and messages relevant to its role. Good balance of focus and awareness.
+Each agent sees:
+
+- The full workspace **summary** (a rendered text overview)
+- **Detailed content** for sections they have read access to
+- **Messages** addressed to them, from them, or broadcast to the team
+- **Active reviews** they're involved in
+- **All team decisions** (everyone gets these regardless of permissions)
+
+On propagation, the agent's collaborators and reviewers are notified of changes. Write permissions are enforced — agents can only update sections listed in their `workspaceWrite`.
 
 ---
 
 ### Use hierarchical
 
-The orchestrator curates what each agent sees. Agents only receive context that the orchestrator explicitly includes in their assignment. Best for sensitive tasks where you want tight information control.
+Each agent sees:
+
+- A **workspace overview** (summary only)
+- **Detailed content** for sections they have read access to
+- A **communication notice** telling them to route all questions through the orchestrator
+
+No messages or reviews are injected. The orchestrator curates all information flow. On propagation, only the orchestrator is notified.
+
+This is the most restrictive strategy. Use it for sensitive tasks where you want tight information control.
 
 ---
 
 ### Use broadcast
 
-Every agent sees the full workspace state. Maximum visibility, but noisier context. Use this for small teams where everyone needs the full picture.
+Every agent sees:
+
+- The **full workspace** — all 8 sections in detail
+- **All recent team messages** (up to 20)
+- **All active reviews**
+- The **full team roster** with status and expertise
+
+On propagation, all agents except the author are notified. Write permission checks are skipped. Maximum visibility, highest token cost.
 
 ---
 
@@ -131,60 +326,71 @@ Every agent sees the full workspace state. Maximum visibility, but noisier conte
 
 The review protocol ensures quality through structured critique-revision loops.
 
-1. The orchestrator triggers a review by pairing an author with a reviewer.
-2. The reviewer critiques the artifact using `[CRITIQUE]` and `[APPROVED]` tags.
-3. If not approved, the author revises and resubmits.
-4. This repeats for up to 3 rounds.
-5. If the review doesn't converge, it auto-escalates to the orchestrator for mediation.
+---
 
-:::note
-The orchestrator can mediate escalated reviews by recording a decision and force-approving the review thread.
-:::
+### Know the flow
+
+1. The orchestrator triggers a review by emitting `{"action":"review","artifact":"...","author":"developer","reviewer":"architect"}`.
+2. The reviewer receives the artifact plus the reviewer-instructions prompt.
+3. The reviewer responds with `[APPROVED]` (done) or `[CRITIQUE]` (needs work).
+4. If critiqued, the author receives the critique plus the revision-instructions prompt.
+5. The author responds with a `## Revision Summary` and an `[ARTIFACT]` block containing the revised work.
+6. Steps 2-5 repeat for up to **3 rounds**.
+7. If the review doesn't converge after 3 rounds, it's **auto-escalated** to the orchestrator.
 
 ---
 
-## Know the orchestrator actions
+### Track review status
 
-The orchestrator drives the team by emitting structured JSON actions. Here are all 11.
+| Status           | Meaning                                        |
+| ---------------- | ---------------------------------------------- |
+| `active`         | Review is in progress                          |
+| `approved`       | Reviewer signed off                            |
+| `needs_revision` | Critique recorded, waiting for author revision |
+| `escalated`      | 3 rounds without convergence, needs mediation  |
 
-| Action     | Purpose                                             |
-| ---------- | --------------------------------------------------- |
-| `staff`    | Spawn multiple agents and assign initial tasks      |
-| `assign`   | Give a task to an existing agent                    |
-| `spawn`    | Add a single new specialist to the roster           |
-| `retire`   | Remove an agent that's no longer needed             |
-| `route`    | Forward a question from one agent to another        |
-| `decide`   | Record an architectural or design decision          |
-| `escalate` | Ask the user a question when the team is stuck      |
-| `advance`  | Move to the next phase                              |
-| `review`   | Trigger a review loop between author and reviewer   |
-| `mediate`  | Resolve an escalated review with a binding decision |
-| `complete` | End the session with a summary                      |
+The orchestrator can mediate escalated reviews using the `mediate` action, which records a decision and force-approves the thread.
 
 ---
 
-## Use the workspace
+### Know the prompts
 
-The workspace is shared state organized into 8 sections.
+The review system uses two dedicated prompt templates.
 
-| Section        | Content                                    |
-| -------------- | ------------------------------------------ |
-| `goal`         | The user's original request                |
-| `constraints`  | Boundaries and requirements                |
-| `plan`         | Architecture and task breakdown            |
-| `tasks`        | Individual work items with status          |
-| `decisions`    | Approved decisions with rationale          |
-| `questions`    | Open and answered questions between agents |
-| `artifacts`    | Code, configs, and other outputs           |
-| `agent_states` | Per-agent working state                    |
+**`reviewer-instructions.txt`** tells the reviewer to:
 
-Each agent has read and write permissions for specific sections, defined by its role template.
+- Check the artifact against the team's plan and constraints
+- Respond with `[APPROVED]` if quality criteria are met
+- Respond with `[CRITIQUE]` with specific, actionable feedback if issues are found
+- Be proportional — minor style issues shouldn't block approval
+
+**`revision-instructions.txt`** tells the author to:
+
+- Address every critique point explicitly (fix or disagree with evidence)
+- Provide a `## Revision Summary` explaining what was changed
+- Wrap the revised work in an `[ARTIFACT]` block
+- Never silently ignore feedback
+
+---
+
+## Track agent status
+
+Every agent on the roster has a status that the orchestrator monitors.
+
+| Status    | Meaning                       |
+| --------- | ----------------------------- |
+| `idle`    | Ready for new work            |
+| `working` | Currently executing a task    |
+| `waiting` | Blocked on input from another |
+| `retired` | Removed from the team         |
+
+Retired agents are excluded from `Roster.list()` and `Roster.get()` lookups. The roster also tracks `steps_used` and `tokens_consumed` per agent.
 
 ---
 
 ## Listen to events
 
-Teams emit 14 events that you can subscribe to in [plugins](/docs/plugins).
+Teams emit 14 events through the bus system. You can subscribe to these in [plugins](/docs/plugins).
 
 ```ts title=".opencode/plugins/team-logger.ts"
 import type { Plugin } from "@opencode-ai/plugin"
@@ -213,43 +419,170 @@ export const TeamLogger: Plugin = async ({ client }) => {
 **Session lifecycle:**
 
 - `team.created` — New team session started
-- `team.updated` — Session status changed
-- `team.completed` — Session finished with summary
+- `team.updated` — Session status changed (e.g. `active` → `waiting_user`)
+- `team.completed` — Session finished, includes summary string
 
 **Orchestrator:**
 
-- `team.phase_changed` — Phase transition
-- `team.decision` — Decision recorded
+- `team.phase_changed` — Phase transition (includes `teamSessionID` and new `phase`)
+- `team.decision` — Decision recorded in workspace
 - `team.escalated` — Question escalated to user
 
 **Agent lifecycle:**
 
 - `team.agent.spawned` — New agent joined the roster
 - `team.agent.retired` — Agent removed from the roster
-- `team.agent.updated` — Agent status changed
+- `team.agent.updated` — Agent status changed (e.g. `idle` → `working`)
 
 **Communication:**
 
-- `team.message` — Message sent between agents
+- `team.message` — Message sent between agents (includes full `Info` object)
 
 **Workspace:**
 
-- `workspace.updated` — Workspace section changed
+- `workspace.updated` — Workspace section changed (includes `section` and `updatedBy`)
 
 **Reviews:**
 
 - `team.review.started` — Review thread created
 - `team.review.completed` — Review approved
-- `team.review.escalated` — Review hit max rounds
+- `team.review.escalated` — Review hit max rounds (includes `reason` string)
+
+---
+
+## Know the prompts
+
+The team module includes 12 prompt templates in `src/team/prompt/`.
+
+| File                         | Used by                 | Purpose                                        |
+| ---------------------------- | ----------------------- | ---------------------------------------------- |
+| `orchestrator.txt`           | Orchestrator loop       | Team management instructions and action format |
+| `architect.txt`              | Architect agent         | System design and pattern selection            |
+| `developer.txt`              | Developer agent         | Implementation and code quality                |
+| `qa.txt`                     | QA agent                | Testing and verification                       |
+| `security-reviewer.txt`      | Security reviewer agent | Vulnerability assessment                       |
+| `performance-specialist.txt` | Performance agent       | Optimization and profiling                     |
+| `database-specialist.txt`    | Database agent          | Schema design and query optimization           |
+| `devops.txt`                 | DevOps agent            | Deployment and infrastructure                  |
+| `ux-reviewer.txt`            | UX reviewer agent       | Usability and accessibility                    |
+| `documentation-writer.txt`   | Documentation agent     | Technical writing                              |
+| `reviewer-instructions.txt`  | Review loop (reviewer)  | How to critique artifacts                      |
+| `revision-instructions.txt`  | Review loop (author)    | How to address critique feedback               |
+
+The orchestrator prompt is the most critical — it defines the action format, team composition guidelines, intervention triggers, and phase progression rules.
+
+---
+
+## Use the API
+
+The `Team` namespace exposes four functions for programmatic use.
+
+---
+
+### Create and run
+
+`Team.start()` creates a session and runs the orchestrator loop to completion.
+
+```ts
+const result = await Team.start({
+  goal: "Build a REST API with auth",
+  sharingStrategy: "selective",
+  onEscalate: async (question) => {
+    // Return the user's answer
+    return "Use JWT with httpOnly cookies"
+  },
+  onStatus: (message) => console.log(message),
+  abort: controller.signal,
+})
+
+// result.teamSession — the final Team.Info
+// result.summary — completion summary string
+```
+
+The `onEscalate` callback is required. It's called when the orchestrator uses the `escalate` action. The session status flips to `waiting_user` until you return an answer.
+
+---
+
+### Inspect a running session
+
+`Team.status()` returns the current state of a team session.
+
+```ts
+const status = Team.status(teamSessionID)
+// status.info — session metadata (phase, status, strategy)
+// status.roster — active agents with role, status, expertise
+// status.recentActivity — last 10 messages (type, from, to, content)
+// status.openQuestions — unanswered questions
+// status.workspaceSummary — rendered workspace text
+```
+
+---
+
+### Cancel a session
+
+`Team.cancel()` retires all agents and sets the session status to `cancelled`.
+
+```ts
+Team.cancel(teamSessionID)
+```
 
 ---
 
 ## Run the tests
 
-The team module has a comprehensive test suite with 396 passing tests across 16 files.
+The team module has 396 passing tests across 16 files.
 
 ```bash
 bun test test/team/
 ```
 
-Tests cover schema round-trips, workspace CRUD, roster lifecycle, message routing, role matching, sharing strategies, output parsing, review extraction, and orchestrator utilities. Functions that call the LLM (like `Execute.run` and `Orchestrator.run`) are not unit tested — they require integration testing with a real provider.
+:::note
+One test shows as "fail" on Windows due to a known `EBUSY` file cleanup issue in the test preload. It's unrelated to team functionality.
+:::
+
+---
+
+### Know what's covered
+
+| Test file                            | Area                   | What it tests                                                                       |
+| ------------------------------------ | ---------------------- | ----------------------------------------------------------------------------------- |
+| `schema-comprehensive.test.ts`       | Database schema        | All 5 tables: insert, read back, enum values, FK cascades, JSON columns             |
+| `workspace-comprehensive.test.ts`    | Workspace CRUD         | Create, get, set, append, remove, addDecision, addQuestion, answerQuestion, summary |
+| `workspace.test.ts`                  | Workspace basics       | Section initialization, version tracking                                            |
+| `roster-comprehensive.test.ts`       | Agent lifecycle        | Spawn, retire, setStatus, incrementSteps, shouldRetire, list filtering              |
+| `message-comprehensive.test.ts`      | Message routing        | Send, recent, forRole, byType, broadcast vs targeted                                |
+| `review-comprehensive.test.ts`       | Review protocol        | Create, approve, escalate, incrementRound, addCritique, addRevision, history        |
+| `roles-comprehensive.test.ts`        | Role templates         | All 9 templates, get, list, register, signal matching                               |
+| `roles.test.ts`                      | Role matching          | Signal detection, active-role exclusion, scoring                                    |
+| `parse-output.test.ts`               | Output parsing         | All 8 tag types, multi-tag extraction, edge cases                                   |
+| `execute-comprehensive.test.ts`      | Execution bridge       | buildContext, buildMessage, parseOutput defaults, extractAssistantText              |
+| `orchestrator-comprehensive.test.ts` | Orchestrator utilities | parseAction for all 11 types, extractText, forceAdvance, phase order                |
+| `review-loop-comprehensive.test.ts`  | Review loop parsing    | extractRevised with `[ARTIFACT]` tags, fallback behavior                            |
+| `sharing-comprehensive.test.ts`      | Sharing strategies     | Strategy resolution, interface conformance                                          |
+| `hooks-comprehensive.test.ts`        | Plugin events          | All 14 events exported and accessible                                               |
+| `team-index-comprehensive.test.ts`   | Team namespace         | Info schema parsing, Status/Phase enums, Event definitions                          |
+| `team-db.test.ts`                    | Database integration   | End-to-end DB operations with real SQLite                                           |
+
+---
+
+### Know what's not tested
+
+Functions that call `SessionPrompt.prompt()` cannot be unit tested because they require a real LLM provider. These are:
+
+- `Execute.run()` — runs an agent against the LLM
+- `Orchestrator.run()` — the main orchestrator loop
+- `ReviewLoop.run()` — the critique-revision cycle
+- `Team.start()` — creates a session and runs the orchestrator
+- `Roster.spawn()` — creates a `Session` (requires DB + project context)
+
+This follows the project's testing philosophy: avoid mocks, test real implementations. These functions need integration tests with a configured provider.
+
+---
+
+### Run a single test file
+
+```bash
+bun test test/team/parse-output.test.ts
+```
+
+All tests use the `Instance.provide({ directory, fn })` pattern for database access, with `test/preload.ts` for isolation. No mocks are used — tests run against real SQLite with real migrations.
