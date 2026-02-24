@@ -537,6 +537,26 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
             }),
           )
           fullSyncedSessions.add(sessionID)
+
+          // Hydrate team state if an active team exists for this session
+          try {
+            const url = `${sdk.url}/session/${encodeURIComponent(sessionID)}/team`
+            const res = await fetch(url)
+            if (res.ok) {
+              const data = await res.json()
+              if (data) {
+                setStore("team", sessionID, {
+                  teamSessionID: data.teamSessionID,
+                  goal: data.goal,
+                  phase: data.phase,
+                  phases: data.phases,
+                  agents: data.agents,
+                })
+              }
+            }
+          } catch {
+            // Team hydration is best-effort; ignore errors
+          }
         },
       },
       bootstrap,

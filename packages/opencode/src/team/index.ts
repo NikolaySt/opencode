@@ -136,12 +136,20 @@ export namespace Team {
     })
   }
 
+  export interface Activity {
+    time: number
+    type: string
+    role?: string
+    message: string
+  }
+
   export async function start(input: {
     goal: string
     sharingStrategy?: "selective" | "hierarchical" | "broadcast"
     parentSessionID?: string
     onEscalate: (question: string) => Promise<string>
     onStatus?: (message: string) => void
+    onActivity?: (activity: Activity) => void
     abort?: AbortSignal
   }): Promise<{ teamSession: Info; summary: string }> {
     const teamSession = await create({ goal: input.goal, sharingStrategy: input.sharingStrategy })
@@ -163,6 +171,7 @@ export namespace Team {
       phase: teamSession.phase,
       sharingStrategy: input.sharingStrategy,
       abort: input.abort,
+      onActivity: input.onActivity,
       onEscalate: async (question: string) => {
         setStatus(teamSession.id, "waiting_user")
         const answer = await input.onEscalate(question)
@@ -187,6 +196,68 @@ export namespace Team {
 
     Bus.publish(Event.Completed, { info: final, summary })
     return { teamSession: final, summary }
+  }
+
+  const PHASE_ORDER: Phase[] = ["understanding", "design", "implementation", "verification", "complete"]
+
+  /**
+   * Reconstruct a TeamProgress snapshot from the DB.
+   * Used by the server endpoint to hydrate team state on TUI reload.
+   */
+  export function progress(
+    teamSessionID: string,
+    parentSessionID: string,
+  ):
+    | {
+        teamSessionID: string
+        parentSessionID: string
+        goal: string
+        phase: Phase
+        phases: Array<{ name: Phase; status: "completed" | "in_progress" | "pending" }>
+        agents: Array<{
+          role: string
+          task: string
+          status: "idle" | "working" | "waiting" | "retired" | "done"
+          stepsUsed: number
+          tokensConsumed: number
+        }>
+      }
+    | undefined {
+    const info = get(teamSessionID)
+    if (!info) return undefined
+
+    const phases = PHASE_ORDER.filter((p) => p !== "complete").map((p) => {
+      const idx = PHASE_ORDER.indexOf(p)
+      const current = PHASE_ORDER.indexOf(info.phase)
+      const status: "completed" | "in_progress" | "pending" =
+        idx < current ? "completed" : idx === current ? "in_progress" : "pending"
+      return { name: p, status }
+    })
+
+    const roster = Roster.list(teamSessionID)
+    const agents = roster.map((a) => ({
+      role: a.role,
+      task: "",
+      status: a.status as "idle" | "working" | "waiting" | "retired" | "done",
+      stepsUsed: a.stepsUsed,
+      tokensConsumed: a.tokensConsumed,
+    }))
+
+    // Try to get recent handoff messages for task info
+    const messages = TeamMessage.recent(teamSessionID, 50)
+    for (const agent of agents) {
+      const handoff = messages.findLast((m) => m.type === "handoff" && m.toRole === agent.role)
+      if (handoff) agent.task = handoff.content.slice(0, 100)
+    }
+
+    return {
+      teamSessionID,
+      parentSessionID,
+      goal: info.goal,
+      phase: info.phase,
+      phases,
+      agents,
+    }
   }
 
   export function cancel(teamSessionID: string) {

@@ -474,3 +474,102 @@ describe("team.Team.status edge cases", () => {
     })
   })
 })
+
+describe("team.Team.progress", () => {
+  test("returns undefined for non-existent team", async () => {
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        expect(Team.progress("team_nonexistent", "session_1")).toBeUndefined()
+      },
+    })
+  })
+
+  test("returns progress with correct phase pipeline", async () => {
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const teamID = createTeamSessionDirect(Instance.project.id, { phase: "design" })
+        Workspace.create(teamID, "Build auth")
+
+        const result = Team.progress(teamID, "session_parent")
+        expect(result).toBeDefined()
+        expect(result!.teamSessionID).toBe(teamID)
+        expect(result!.parentSessionID).toBe("session_parent")
+        expect(result!.goal).toBe("Test goal")
+        expect(result!.phase).toBe("design")
+        expect(result!.phases).toHaveLength(4)
+        expect(result!.phases[0]).toEqual({ name: "understanding", status: "completed" })
+        expect(result!.phases[1]).toEqual({ name: "design", status: "in_progress" })
+        expect(result!.phases[2]).toEqual({ name: "implementation", status: "pending" })
+        expect(result!.phases[3]).toEqual({ name: "verification", status: "pending" })
+      },
+    })
+  })
+
+  test("includes agents from roster", async () => {
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const teamID = createTeamSessionDirect(Instance.project.id)
+        Workspace.create(teamID, "Test")
+        insertAgent(teamID, "architect")
+        insertAgent(teamID, "developer")
+
+        const result = Team.progress(teamID, "session_p")
+        expect(result!.agents).toHaveLength(2)
+        expect(result!.agents.map((a) => a.role).sort()).toEqual(["architect", "developer"])
+        expect(result!.agents[0].stepsUsed).toBe(0)
+        expect(result!.agents[0].tokensConsumed).toBe(0)
+      },
+    })
+  })
+
+  test("populates agent task from handoff messages", async () => {
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const teamID = createTeamSessionDirect(Instance.project.id)
+        Workspace.create(teamID, "Test")
+        insertAgent(teamID, "developer")
+
+        TeamMessage.send({
+          teamSessionID: teamID,
+          fromRole: "orchestrator",
+          toRole: "developer",
+          type: "handoff",
+          content: "Implement the login endpoint",
+        })
+
+        const result = Team.progress(teamID, "session_p")
+        expect(result!.agents[0].task).toBe("Implement the login endpoint")
+      },
+    })
+  })
+
+  test("returns empty agents when no roster", async () => {
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const teamID = createTeamSessionDirect(Instance.project.id)
+        Workspace.create(teamID, "Test")
+
+        const result = Team.progress(teamID, "session_p")
+        expect(result!.agents).toEqual([])
+      },
+    })
+  })
+
+  test("phase pipeline shows all completed when phase is complete", async () => {
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const teamID = createTeamSessionDirect(Instance.project.id, { phase: "complete" })
+        Workspace.create(teamID, "Test")
+
+        const result = Team.progress(teamID, "session_p")
+        expect(result!.phases.every((p) => p.status === "completed")).toBe(true)
+      },
+    })
+  })
+})

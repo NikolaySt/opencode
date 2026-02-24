@@ -41,7 +41,71 @@ Here's what happens when you type `/team`:
 
 ## Watch progress
 
-Team sessions integrate with the TUI sidebar and session navigation.
+Team sessions integrate with the TUI in two places — an inline activity feed in the chat view and a Team panel in the sidebar.
+
+---
+
+### Read the activity feed
+
+When the `team` tool runs, a live activity feed appears inline in the chat — the same way bash commands or file edits show up. Each orchestrator action is streamed as it happens.
+
+```txt frame="none"
+# Team
+Build a REST API with auth
+Phase: implementation
+
+ + Staffed architect, developer, qa
+ > architect: Design system architecture
+ > developer: Build REST API endpoints
+ . architect: step 2 — Defining endpoint contracts
+ * architect: done
+ ! Use JWT with httpOnly cookies for auth
+ ~ Advancing to implementation
+>> developer: Implement auth, qa: Write integration tests
+ * developer: done
+ * qa: done
+ # Team complete
+```
+
+The feed shows the last 15 entries. Each entry has a type-based icon and color.
+
+| Icon | Type              | Color   | Meaning                                 |
+| ---- | ----------------- | ------- | --------------------------------------- |
+| `+`  | `staff` / `spawn` | green   | Agent(s) added to the team              |
+| `>`  | `assign`          | yellow  | Task assigned to an agent               |
+| `>>` | `parallel_assign` | yellow  | Multiple agents assigned concurrently   |
+| ` .` | `agent_step`      | muted   | Agent progressing through a sub-step    |
+| ` *` | `agent_done`      | green   | Agent finished its task                 |
+| `?`  | `route`           | default | Question routed between agents          |
+| `!`  | `decide`          | default | Decision recorded                       |
+| `!!` | `escalate`        | red     | Question escalated to user              |
+| `~`  | `advance`         | yellow  | Phase transition                        |
+| `R`  | `review`          | default | Review triggered between agents         |
+| `M`  | `mediate`         | default | Orchestrator mediating escalated review |
+| `#`  | `complete`        | green   | Team session finished                   |
+| `-`  | `retire`          | muted   | Agent removed from roster               |
+| `x`  | `error`           | red     | Error occurred                          |
+
+When the team finishes, the feed collapses to show a summary with the goal, final phase, roster, files modified, and commands run.
+
+---
+
+### Know how activities stream
+
+The `TeamTool` passes an `onActivity` callback to `Team.start()`. The orchestrator calls this at every action — staff, assign, spawn, retire, route, decide, escalate, advance, review, mediate, complete, and more.
+
+Each activity is an object with four fields.
+
+```ts
+interface Activity {
+  time: number // timestamp
+  type: string // action type (staff, assign, agent_step, etc.)
+  role?: string // agent role, if relevant
+  message: string // human-readable description
+}
+```
+
+Activities accumulate in the tool (max 50) and stream to the TUI via `ctx.metadata()` on every callback. The TUI re-renders the `TeamSession` component each time a new activity arrives.
 
 ---
 
@@ -65,6 +129,8 @@ Each agent displays a color-coded status dot, role name, status label, step coun
 ```
 
 This is the richest way to monitor team progress. Phase indicators use `✓` for completed, `●` for in-progress, and `○` for pending.
+
+The inline activity feed also shows a condensed phase and agent roster when available, pulled from the same `team.progress` bus events that drive the sidebar.
 
 ---
 
@@ -136,9 +202,9 @@ Each table has a foreign key to `team_session` with `ON DELETE CASCADE`. Compoun
 
 ```txt frame="none"
 src/team/
-├── index.ts              Team namespace (create, start, cancel, status)
+├── index.ts              Team namespace (create, start, cancel, status, Activity interface)
 ├── team.sql.ts           Drizzle schema (5 tables)
-├── orchestrator.ts       Orchestrator loop (12 actions, parallel execution, phase budgets)
+├── orchestrator.ts       Orchestrator loop (12 actions, parallel execution, phase budgets, onActivity)
 ├── execute.ts            Execution bridge (multi-step, context building, output parsing)
 ├── roster.ts             Agent lifecycle
 ├── workspace.ts          Shared state CRUD
@@ -155,8 +221,18 @@ src/team/
 └── prompt/               12 prompt template files (.txt)
 
 src/tool/
-├── team.ts               TeamTool — wraps Team.start() as LLM-callable tool
+├── team.ts               TeamTool — activity accumulator, ctx.metadata() streaming
 └── team.txt              Tool description
+
+src/cli/cmd/tui/routes/session/
+├── index.tsx             TeamSession component (inline activity feed)
+└── sidebar.tsx           Team panel (phase pipeline + agent roster)
+
+src/cli/cmd/tui/context/
+└── sync.tsx              team store field, team.progress + team.completed handlers, hydration
+
+src/server/routes/
+└── session.ts            GET /:sessionID/team endpoint for state hydration
 
 src/command/template/
 └── team.txt              /team command template ($ARGUMENTS → tool call)
@@ -690,6 +766,10 @@ const result = await Team.start({
     return "Use JWT with httpOnly cookies"
   },
   onStatus: (message) => console.log(message),
+  onActivity: (activity) => {
+    // { time, type, role?, message }
+    console.log(`[${activity.type}] ${activity.message}`)
+  },
   abort: controller.signal,
 })
 
@@ -700,6 +780,8 @@ const result = await Team.start({
 The `parentSessionID` threads through to all spawned agent sessions, making them children of the calling session. This enables TUI navigation between agent sessions and keeps them out of the main session list.
 
 The `onEscalate` callback fires when the orchestrator uses the `escalate` action. The session status flips to `waiting_user` until you return an answer.
+
+The `onActivity` callback fires on every orchestrator action. It receives a `Team.Activity` object with `time`, `type`, `role` (optional), and `message`. The `TeamTool` uses this to stream live activity into the chat view.
 
 ---
 
@@ -719,6 +801,14 @@ const status = Team.status(teamSessionID)
 ```
 
 Returns `undefined` for non-existent sessions. When `artifacts` exist but contain no `modified_files` or `commands_run`, empty arrays are returned.
+
+---
+
+### Hydrate team state on reload
+
+When the TUI reloads or navigates to a session mid-team, it calls `GET /session/:sessionID/team` to recover the team panel and activity feed state. This returns the same `TeamProgress` shape as the `team.progress` bus event, so the sidebar and inline feed populate immediately without waiting for the next live event.
+
+If no active team is found for that session, the endpoint returns `null`.
 
 ---
 
@@ -759,7 +849,7 @@ If the team needs your input, you'll see a question prompt in the TUI.
 
 ## Run the tests
 
-The module has 488 tests across 14 files.
+The module has comprehensive tests across 14+ files.
 
 ```bash frame="none"
 bun test test/team/
@@ -794,7 +884,7 @@ Run from the `packages/opencode` directory. Tests cannot be run from the repo ro
 
 ### Know what's not tested
 
-The TUI sidebar rendering of team progress (the Team panel) is not unit-tested — it's a UI component that reads from bus events.
+The TUI rendering (the Team sidebar panel and inline `TeamSession` activity feed) is not unit-tested — these are UI components that read from bus events and tool metadata.
 
 Functions that call `SessionPrompt.prompt()` need a real LLM provider and can't be unit tested. These are:
 

@@ -3,6 +3,7 @@ import { stream } from "hono/streaming"
 import { describeRoute, validator, resolver } from "hono-openapi"
 import z from "zod"
 import { Session } from "../../session"
+import { Team } from "../../team"
 import { MessageV2 } from "../../session/message-v2"
 import { SessionPrompt } from "../../session/prompt"
 import { SessionCompaction } from "../../session/compaction"
@@ -181,6 +182,87 @@ export const SessionRoutes = lazy(() =>
         const sessionID = c.req.valid("param").sessionID
         const todos = await Todo.get(sessionID)
         return c.json(todos)
+      },
+    )
+    .get(
+      "/:sessionID/team",
+      describeRoute({
+        summary: "Get team progress",
+        description: "Retrieve the current team progress for a session, used to hydrate the TUI team panel on reload.",
+        operationId: "session.team",
+        responses: {
+          200: {
+            description: "Team progress or null if no active team",
+            content: {
+              "application/json": {
+                schema: resolver(
+                  z
+                    .object({
+                      teamSessionID: z.string(),
+                      parentSessionID: z.string(),
+                      goal: z.string(),
+                      phase: z.string(),
+                      phases: z.array(
+                        z.object({
+                          name: z.string(),
+                          status: z.enum(["completed", "in_progress", "pending"]),
+                        }),
+                      ),
+                      agents: z.array(
+                        z.object({
+                          role: z.string(),
+                          task: z.string(),
+                          status: z.enum(["idle", "working", "waiting", "retired", "done"]),
+                          stepsUsed: z.number(),
+                          tokensConsumed: z.number(),
+                        }),
+                      ),
+                    })
+                    .nullable(),
+                ),
+              },
+            },
+          },
+          ...errors(400, 404),
+        },
+      }),
+      validator(
+        "param",
+        z.object({
+          sessionID: z.string().meta({ description: "Parent session ID" }),
+        }),
+      ),
+      async (c) => {
+        const sessionID = c.req.valid("param").sessionID
+        // Find team by looking at child sessions whose title starts with "Team orchestrator:"
+        const children = await Session.children(sessionID)
+        const orchestratorSession = children.find((s) => s.title?.startsWith("Team orchestrator:"))
+        if (!orchestratorSession) return c.json(null)
+
+        // Find the active team session. The orchestrator session title contains the goal,
+        // and we can match by looking up team sessions for this project.
+        // The agent instances link team_session_id -> session_id (child of parent).
+        // Use a simpler approach: scan active team sessions for the project.
+        const { Database, eq, and } = await import("../../storage/db")
+        const { TeamSessionTable } = await import("../../team/team.sql")
+        const { Instance } = await import("../../project/instance")
+
+        const active = Database.use((db) =>
+          db
+            .select()
+            .from(TeamSessionTable)
+            .where(and(eq(TeamSessionTable.project_id, Instance.project.id), eq(TeamSessionTable.status, "active")))
+            .all(),
+        )
+
+        // Match by goal from orchestrator session title
+        const goalPrefix = orchestratorSession.title?.replace("Team orchestrator: ", "") ?? ""
+        const match = active.find((t) => t.goal.startsWith(goalPrefix)) ?? active.find((t) => t.status === "active")
+
+        if (!match) return c.json(null)
+
+        const result = Team.progress(match.id, sessionID)
+        return c.json(result ?? null)
       },
     )
     .post(

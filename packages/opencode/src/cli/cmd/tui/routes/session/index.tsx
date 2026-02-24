@@ -43,6 +43,7 @@ import type { EditTool } from "@/tool/edit"
 import type { ApplyPatchTool } from "@/tool/apply_patch"
 import type { WebFetchTool } from "@/tool/webfetch"
 import type { TaskTool } from "@/tool/task"
+import type { TeamTool } from "@/tool/team"
 import type { QuestionTool } from "@/tool/question"
 import type { SkillTool } from "@/tool/skill"
 import { useKeyboard, useRenderer, useTerminalDimensions, type JSX } from "@opentui/solid"
@@ -1491,6 +1492,9 @@ function ToolPart(props: { last: boolean; part: ToolPart; message: AssistantMess
         <Match when={props.part.tool === "task"}>
           <Task {...toolprops} />
         </Match>
+        <Match when={props.part.tool === "team"}>
+          <TeamSession {...toolprops} />
+        </Match>
         <Match when={props.part.tool === "apply_patch"}>
           <ApplyPatch {...toolprops} />
         </Match>
@@ -1954,6 +1958,151 @@ function Task(props: ToolProps<typeof TaskTool>) {
         </InlineTool>
       </Match>
     </Switch>
+  )
+}
+
+function TeamSession(props: ToolProps<typeof TeamTool>) {
+  const { theme } = useTheme()
+  const sync = useSync()
+
+  const isRunning = createMemo(() => props.part.state.status === "running")
+  const meta = createMemo(() => (props.metadata ?? {}) as Record<string, unknown>)
+  const activities = createMemo(
+    () => (meta().activities ?? []) as Array<{ time: number; type: string; role?: string; message: string }>,
+  )
+  const sessionID = createMemo(() => props.part.sessionID)
+  const team = createMemo(() => sync.data.team[sessionID()])
+
+  const icon = (type: string) => {
+    const map: Record<string, string> = {
+      staff: "+",
+      spawn: "+",
+      assign: ">",
+      parallel_assign: ">>",
+      agent_step: " .",
+      agent_done: " *",
+      route: "?",
+      decide: "!",
+      escalate: "!!",
+      advance: "~",
+      review: "R",
+      mediate: "M",
+      complete: "#",
+      retire: "-",
+      error: "x",
+    }
+    return map[type] ?? "."
+  }
+
+  const color = (type: string) => {
+    const map: Record<string, typeof theme.text> = {
+      staff: theme.success,
+      spawn: theme.success,
+      assign: theme.warning,
+      parallel_assign: theme.warning,
+      agent_step: theme.textMuted,
+      agent_done: theme.success,
+      route: theme.text,
+      decide: theme.text,
+      escalate: theme.error,
+      advance: theme.warning,
+      review: theme.text,
+      mediate: theme.text,
+      complete: theme.success,
+      retire: theme.textMuted,
+      error: theme.error,
+    }
+    return map[type] ?? theme.textMuted
+  }
+
+  const visible = createMemo(() => activities().slice(-15))
+  const phase = createMemo(() => team()?.phase ?? (meta().phase as string) ?? "")
+  const goal = createMemo(() => (props.input.goal ?? (meta().goal as string) ?? "").slice(0, 70))
+  const phases = createMemo(() => team()?.phases ?? [])
+  const agents = createMemo(() => team()?.agents?.filter((a) => a.status !== "retired") ?? [])
+
+  return (
+    <BlockTool title={isRunning() ? "# Team" : "# Team complete"} part={props.part} spinner={isRunning()}>
+      <text fg={theme.textMuted}>{goal()}</text>
+      <Show when={phases().length > 0}>
+        <box flexDirection="row" gap={1} paddingTop={1}>
+          <For each={phases()}>
+            {(p) => (
+              <text
+                fg={
+                  p.status === "completed"
+                    ? theme.success
+                    : p.status === "in_progress"
+                      ? theme.warning
+                      : theme.textMuted
+                }
+              >
+                {p.status === "completed" ? "✓" : p.status === "in_progress" ? "●" : "○"} {p.name}
+              </text>
+            )}
+          </For>
+        </box>
+      </Show>
+      <Show when={phases().length === 0 && phase()}>
+        <text fg={theme.text}>
+          Phase: <span style={{ fg: theme.warning }}>{phase()}</span>
+        </text>
+      </Show>
+      <Show when={agents().length > 0}>
+        <box paddingTop={1}>
+          <For each={agents()}>
+            {(agent) => (
+              <box flexDirection="row" gap={1}>
+                <text
+                  flexShrink={0}
+                  fg={
+                    agent.status === "working"
+                      ? theme.warning
+                      : agent.status === "done"
+                        ? theme.success
+                        : theme.textMuted
+                  }
+                >
+                  •
+                </text>
+                <text fg={theme.text} wrapMode="word">
+                  {agent.role}{" "}
+                  <span style={{ fg: theme.textMuted }}>
+                    {agent.status}
+                    {agent.stepsUsed > 0 ? ` ${agent.stepsUsed}s` : ""}
+                    {agent.tokensConsumed > 0 ? ` ${(agent.tokensConsumed / 1000).toFixed(1)}k` : ""}
+                  </span>
+                  <Show when={agent.task}>
+                    <span style={{ fg: theme.textMuted }}> {agent.task.slice(0, 50)}</span>
+                  </Show>
+                </text>
+              </box>
+            )}
+          </For>
+        </box>
+      </Show>
+      <Show when={visible().length > 0}>
+        <box paddingTop={1}>
+          <For each={visible()}>
+            {(entry) => (
+              <box flexDirection="row" gap={1}>
+                <text flexShrink={0} fg={color(entry.type)}>
+                  {icon(entry.type).padStart(2)}
+                </text>
+                <text fg={entry.type === "agent_step" ? theme.textMuted : theme.text} wrapMode="word">
+                  {entry.message}
+                </text>
+              </box>
+            )}
+          </For>
+        </box>
+      </Show>
+      <Show when={!isRunning() && props.output}>
+        <box paddingTop={1}>
+          <text fg={theme.textMuted}>{(props.output ?? "").split("\n").slice(0, 8).join("\n")}</text>
+        </box>
+      </Show>
+    </BlockTool>
   )
 }
 

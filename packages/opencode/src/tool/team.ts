@@ -18,11 +18,26 @@ export const TeamTool = Tool.define("team", {
   description: DESCRIPTION,
   parameters,
   async execute(params, ctx) {
+    const activities: Team.Activity[] = []
+    const maxActivities = 50
+
+    function pushMetadata() {
+      ctx.metadata({
+        title: activities.at(-1)?.message ?? `Team: ${params.goal.slice(0, 60)}`,
+        metadata: {
+          goal: params.goal,
+          sharingStrategy: params.sharing_strategy ?? "selective",
+          activities: activities.slice(-maxActivities),
+        },
+      })
+    }
+
     ctx.metadata({
       title: `Team: ${params.goal.slice(0, 60)}`,
       metadata: {
         goal: params.goal,
         sharingStrategy: params.sharing_strategy ?? "selective",
+        activities: [],
       },
     })
 
@@ -46,13 +61,11 @@ export const TeamTool = Tool.define("team", {
         return answers[0]?.[0] ?? "No answer provided"
       },
       onStatus: (message) => {
-        ctx.metadata({
-          title: message,
-          metadata: {
-            goal: params.goal,
-            sharingStrategy: params.sharing_strategy ?? "selective",
-          },
-        })
+        pushMetadata()
+      },
+      onActivity: (entry) => {
+        activities.push(entry)
+        pushMetadata()
       },
     })
 

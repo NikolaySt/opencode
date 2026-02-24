@@ -478,6 +478,7 @@ export namespace Orchestrator {
     onEscalate: (question: string) => Promise<string>
     onPhaseChange: (phase: Phase) => void
     onComplete: (summary: string) => void
+    onActivity?: (activity: { time: number; type: string; role?: string; message: string }) => void
     abort?: AbortSignal
   }) {
     let phase = input.phase
@@ -486,7 +487,13 @@ export namespace Orchestrator {
     const maxTotalSteps = 100
     const agentTasks: TaskEntry[] = []
 
+    function activity(type: string, message: string, role?: string) {
+      input.onActivity?.({ time: Date.now(), type, role, message })
+    }
+
     log.info("starting orchestrator loop", { teamSessionID: input.teamSessionID, goal: input.goal })
+
+    activity("advance", `Starting phase: ${phase}`)
 
     // Initial TODO state
     syncTodos(input.parentSessionID, input.teamSessionID, input.goal, phase, agentTasks)
@@ -497,6 +504,7 @@ export namespace Orchestrator {
       // Enforce phase budget
       const budget = PHASE_BUDGETS[phase]
       if (budget > 0 && phaseSteps >= budget) {
+        activity("advance", `Phase "${phase}" budget exhausted (${phaseSteps}/${budget}), auto-advancing`)
         log.warn("phase budget exceeded, forcing advance", { phase, phaseSteps, budget })
         const nextPhase = forceAdvance(phase)
         if (nextPhase) {
@@ -572,6 +580,7 @@ export namespace Orchestrator {
 
       switch (action.action) {
         case "staff": {
+          activity("staff", `Staffing ${action.roles.length} agents: ${action.roles.map((r) => r.role).join(", ")}`)
           // Spawn all agents first (sequential — each creates a session)
           for (const spec of action.roles) {
             const template = Roles.get(spec.role)
@@ -591,12 +600,17 @@ export namespace Orchestrator {
               },
             })
             agentTasks.push({ role: spec.role, task: spec.task, done: false })
+            activity("spawn", `Spawned ${spec.role}`, spec.role)
           }
           syncTodos(input.parentSessionID, input.teamSessionID, input.goal, phase, agentTasks)
 
           // Run initial tasks in parallel
+          activity("parallel_assign", `Running ${action.roles.length} agents in parallel`)
           const assignments = action.roles.map((spec) => ({ role: spec.role, task: spec.task }))
           await runParallel(assignments, input, phase, agentTasks)
+          for (const spec of action.roles) {
+            activity("agent_done", `${spec.role} finished initial task`, spec.role)
+          }
           break
         }
 
@@ -606,6 +620,7 @@ export namespace Orchestrator {
             log.warn("agent not found for assignment", { role: action.role })
             break
           }
+          activity("assign", `${action.role}: ${action.task.slice(0, 80)}`, action.role)
           const assignEntry: TaskEntry = { role: action.role, task: action.task, done: false }
           agentTasks.push(assignEntry)
           syncTodos(input.parentSessionID, input.teamSessionID, input.goal, phase, agentTasks)
@@ -620,17 +635,20 @@ export namespace Orchestrator {
               if (!assignEntry.subSteps) assignEntry.subSteps = []
               assignEntry.subSteps.push({ description: step.description, done: false })
               for (let i = 0; i < assignEntry.subSteps.length - 1; i++) assignEntry.subSteps[i].done = true
+              activity("agent_step", `${action.role}: ${step.description.slice(0, 60)}`, action.role)
               syncTodos(input.parentSessionID, input.teamSessionID, input.goal, phase, agentTasks)
             },
           )
           await processAgentResult(input.teamSessionID, agent, multiResult.merged)
           assignEntry.done = true
           if (assignEntry.subSteps) for (const s of assignEntry.subSteps) s.done = true
+          activity("agent_done", `${action.role} completed task`, action.role)
           syncTodos(input.parentSessionID, input.teamSessionID, input.goal, phase, agentTasks)
           break
         }
 
         case "spawn": {
+          activity("spawn", `Spawning ${action.role}: ${action.reason.slice(0, 60)}`, action.role)
           const template = Roles.get(action.role)
           await Roster.spawn({
             teamSessionID: input.teamSessionID,
@@ -651,12 +669,14 @@ export namespace Orchestrator {
         }
 
         case "retire": {
+          activity("retire", `Retiring ${action.role}: ${action.reason.slice(0, 60)}`, action.role)
           const agent = Roster.get(input.teamSessionID, action.role)
           if (agent) Roster.retire(agent.id)
           break
         }
 
         case "route": {
+          activity("route", `${action.from} -> ${action.to}: ${action.question.slice(0, 60)}`)
           Workspace.addQuestion(input.teamSessionID, {
             question: action.question,
             asked_by: action.from,
@@ -687,12 +707,14 @@ export namespace Orchestrator {
             await processAgentResult(input.teamSessionID, target, multiResult.merged)
             routeEntry.done = true
             if (routeEntry.subSteps) for (const s of routeEntry.subSteps) s.done = true
+            activity("agent_done", `${action.to} answered question from ${action.from}`, action.to)
             syncTodos(input.parentSessionID, input.teamSessionID, input.goal, phase, agentTasks)
           }
           break
         }
 
         case "decide": {
+          activity("decide", action.description.slice(0, 80))
           const decision = Workspace.addDecision(input.teamSessionID, {
             description: action.description,
             rationale: action.rationale,
@@ -705,6 +727,7 @@ export namespace Orchestrator {
         }
 
         case "escalate": {
+          activity("escalate", `Asking user: ${action.question.slice(0, 80)}`)
           Bus.publish(Event.Escalated, { teamSessionID: input.teamSessionID, question: action.question })
           const answer = await input.onEscalate(action.question)
           Workspace.addDecision(input.teamSessionID, {
@@ -718,6 +741,7 @@ export namespace Orchestrator {
         }
 
         case "advance": {
+          activity("advance", `Advancing to ${action.phase}: ${action.summary.slice(0, 60)}`)
           phase = action.phase
           phaseSteps = 0
           input.onPhaseChange(phase)
@@ -733,6 +757,7 @@ export namespace Orchestrator {
         }
 
         case "review": {
+          activity("review", `${action.reviewer} reviewing ${action.author}'s work on ${action.artifact.slice(0, 40)}`)
           const reviewResult = await ReviewLoop.run({
             teamSessionID: input.teamSessionID,
             artifact: action.artifact,
@@ -753,6 +778,7 @@ export namespace Orchestrator {
         }
 
         case "mediate": {
+          activity("mediate", `Mediating review: ${action.decision.slice(0, 60)}`)
           const thread = Review.get(action.review_id)
           if (thread) {
             Workspace.addDecision(input.teamSessionID, {
@@ -775,6 +801,7 @@ export namespace Orchestrator {
         }
 
         case "complete": {
+          activity("complete", action.summary.slice(0, 100))
           phase = "complete"
           input.onComplete(action.summary)
           TeamMessage.send({
@@ -790,6 +817,10 @@ export namespace Orchestrator {
         }
 
         case "parallel_assign": {
+          activity(
+            "parallel_assign",
+            `Running ${action.assignments.length} agents in parallel: ${action.assignments.map((a) => a.role).join(", ")}`,
+          )
           await runParallel(action.assignments, input, phase, agentTasks)
           break
         }
