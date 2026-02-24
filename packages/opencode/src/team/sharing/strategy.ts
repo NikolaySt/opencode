@@ -46,19 +46,19 @@ export interface PropagationResult {
 }
 
 /** Resolve a strategy name to its implementation */
-export function resolve(name: "selective" | "hierarchical" | "broadcast"): SharingStrategy {
+export async function resolve(name: "selective" | "hierarchical" | "broadcast"): Promise<SharingStrategy> {
   switch (name) {
     case "selective": {
-      const { selective } = require("./selective") as typeof import("./selective")
-      return selective
+      const mod = await import("./selective")
+      return mod.selective
     }
     case "hierarchical": {
-      const { hierarchical } = require("./hierarchical") as typeof import("./hierarchical")
-      return hierarchical
+      const mod = await import("./hierarchical")
+      return mod.hierarchical
     }
     case "broadcast": {
-      const { broadcast } = require("./broadcast") as typeof import("./broadcast")
-      return broadcast
+      const mod = await import("./broadcast")
+      return mod.broadcast
     }
   }
 }

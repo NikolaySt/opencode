@@ -72,18 +72,18 @@ function insertAgent(
 }
 
 describe("sharing.strategy.resolve", () => {
-  test("resolves selective strategy", () => {
-    const s = resolve("selective")
+  test("resolves selective strategy", async () => {
+    const s = await resolve("selective")
     expect(s.name).toBe("selective")
   })
 
-  test("resolves hierarchical strategy", () => {
-    const s = resolve("hierarchical")
+  test("resolves hierarchical strategy", async () => {
+    const s = await resolve("hierarchical")
     expect(s.name).toBe("hierarchical")
   })
 
-  test("resolves broadcast strategy", () => {
-    const s = resolve("broadcast")
+  test("resolves broadcast strategy", async () => {
+    const s = await resolve("broadcast")
     expect(s.name).toBe("broadcast")
   })
 })

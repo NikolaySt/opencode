@@ -13,8 +13,9 @@ import { Log } from "@/util/log"
 
 // Lazy import to break circular dependency:
 // orchestrator.ts -> prompt.ts -> registry.ts -> team.ts -> team/index.ts -> orchestrator.ts
-function orchestrator() {
-  return require("./orchestrator").Orchestrator as typeof import("./orchestrator").Orchestrator
+async function orchestrator() {
+  const mod = await import("./orchestrator")
+  return mod.Orchestrator
 }
 
 export namespace Team {
@@ -153,7 +154,8 @@ export namespace Team {
 
     let summary = ""
 
-    await orchestrator().run({
+    const Orch = await orchestrator()
+    await Orch.run({
       teamSessionID: teamSession.id,
       orchestratorSessionID: orchestratorSession.id,
       parentSessionID: input.parentSessionID,

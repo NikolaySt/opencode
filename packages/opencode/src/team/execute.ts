@@ -135,7 +135,7 @@ export namespace Execute {
     Roster.setStatus(agent.id, "working")
 
     const message = strategyName
-      ? buildStrategyMessage(task, agent, teamSessionID, teamGoal, phase, resolve(strategyName))
+      ? buildStrategyMessage(task, agent, teamSessionID, teamGoal, phase, await resolve(strategyName))
       : buildMessage(task, buildContext(agent, teamSessionID), agent, teamGoal, phase)
 
     log.info("running agent", {
@@ -172,7 +172,7 @@ export namespace Execute {
 
       // Run propagation if using a sharing strategy
       if (strategyName) {
-        const strategy = resolve(strategyName)
+        const strategy = await resolve(strategyName)
         strategy.propagate({
           agent,
           teamSessionID,

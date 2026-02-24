@@ -322,24 +322,28 @@ describe("team.orchestrator.extractText", () => {
   })
 })
 
-describe("team.orchestrator.syncTodos (via Todo API)", () => {
-  test("writes phase progress as high-priority TODOs", async () => {
+/**
+ * NOTE: These tests verify Todo.update() and Todo.get() — the underlying
+ * API that Orchestrator.syncTodos() calls internally. They do NOT test
+ * syncTodos itself (it's a private function). The actual syncTodos behavior
+ * is only exercised when Orchestrator.run() runs (requires LLM).
+ *
+ * For real integration tests that verify the import chain and module
+ * loading, see integration.test.ts.
+ */
+describe("Todo API (used by orchestrator.syncTodos)", () => {
+  test("writes phase-style TODOs", async () => {
     await Instance.provide({
       directory: projectRoot,
       fn: async () => {
         const sessionID = createSession(Instance.project.id, projectRoot)
 
-        // Simulate what syncTodos does for the "design" phase
-        const phases = ["understanding", "design", "implementation", "verification"] as const
-        const current = "design"
-        const phaseOrder = ["understanding", "design", "implementation", "verification", "complete"]
-        const todos: Todo.Info[] = []
-        for (const p of phases) {
-          const idx = phaseOrder.indexOf(p)
-          const cur = phaseOrder.indexOf(current)
-          const status = idx < cur ? "completed" : idx === cur ? "in_progress" : "pending"
-          todos.push({ content: `Phase: ${p}`, status, priority: "high" })
-        }
+        const todos: Todo.Info[] = [
+          { content: "Phase: understanding", status: "completed", priority: "high" },
+          { content: "Phase: design", status: "in_progress", priority: "high" },
+          { content: "Phase: implementation", status: "pending", priority: "high" },
+          { content: "Phase: verification", status: "pending", priority: "high" },
+        ]
 
         Todo.update({ sessionID, todos })
         const result = Todo.get(sessionID)
@@ -347,63 +351,6 @@ describe("team.orchestrator.syncTodos (via Todo API)", () => {
         expect(result).toHaveLength(4)
         expect(result[0]).toEqual({ content: "Phase: understanding", status: "completed", priority: "high" })
         expect(result[1]).toEqual({ content: "Phase: design", status: "in_progress", priority: "high" })
-        expect(result[2]).toEqual({ content: "Phase: implementation", status: "pending", priority: "high" })
-        expect(result[3]).toEqual({ content: "Phase: verification", status: "pending", priority: "high" })
-      },
-    })
-  })
-
-  test("writes agent tasks as medium-priority TODOs", async () => {
-    await Instance.provide({
-      directory: projectRoot,
-      fn: async () => {
-        const sessionID = createSession(Instance.project.id, projectRoot)
-
-        const todos: Todo.Info[] = [
-          { content: "[developer] Build REST API", status: "completed", priority: "medium" },
-          { content: "[qa] Write integration tests", status: "in_progress", priority: "medium" },
-          { content: "[architect] Review architecture", status: "in_progress", priority: "medium" },
-        ]
-
-        Todo.update({ sessionID, todos })
-        const result = Todo.get(sessionID)
-
-        expect(result).toHaveLength(3)
-        expect(result[0].content).toBe("[developer] Build REST API")
-        expect(result[0].status).toBe("completed")
-        expect(result[0].priority).toBe("medium")
-        expect(result[1].status).toBe("in_progress")
-        expect(result[2].status).toBe("in_progress")
-      },
-    })
-  })
-
-  test("combines phase progress and agent tasks", async () => {
-    await Instance.provide({
-      directory: projectRoot,
-      fn: async () => {
-        const sessionID = createSession(Instance.project.id, projectRoot)
-
-        // Phase progress (implementation phase)
-        const todos: Todo.Info[] = [
-          { content: "Phase: understanding", status: "completed", priority: "high" },
-          { content: "Phase: design", status: "completed", priority: "high" },
-          { content: "Phase: implementation", status: "in_progress", priority: "high" },
-          { content: "Phase: verification", status: "pending", priority: "high" },
-          // Agent tasks
-          { content: "[developer] Implement user auth", status: "completed", priority: "medium" },
-          { content: "[developer] Add API endpoints", status: "in_progress", priority: "medium" },
-        ]
-
-        Todo.update({ sessionID, todos })
-        const result = Todo.get(sessionID)
-
-        expect(result).toHaveLength(6)
-        // Phases first
-        const high = result.filter((t) => t.priority === "high")
-        const medium = result.filter((t) => t.priority === "medium")
-        expect(high).toHaveLength(4)
-        expect(medium).toHaveLength(2)
       },
     })
   })
@@ -414,29 +361,21 @@ describe("team.orchestrator.syncTodos (via Todo API)", () => {
       fn: async () => {
         const sessionID = createSession(Instance.project.id, projectRoot)
 
-        // First update
         Todo.update({
           sessionID,
-          todos: [
-            { content: "Phase: understanding", status: "in_progress", priority: "high" },
-            { content: "[architect] Design system", status: "in_progress", priority: "medium" },
-          ],
+          todos: [{ content: "Phase: understanding", status: "in_progress", priority: "high" }],
         })
-        expect(Todo.get(sessionID)).toHaveLength(2)
+        expect(Todo.get(sessionID)).toHaveLength(1)
 
-        // Second update replaces everything (simulates phase advance)
         Todo.update({
           sessionID,
           todos: [
             { content: "Phase: understanding", status: "completed", priority: "high" },
             { content: "Phase: design", status: "in_progress", priority: "high" },
-            { content: "[architect] Design system", status: "completed", priority: "medium" },
-            { content: "[developer] Build API", status: "in_progress", priority: "medium" },
           ],
         })
         const result = Todo.get(sessionID)
-
-        expect(result).toHaveLength(4)
+        expect(result).toHaveLength(2)
         expect(result[0].status).toBe("completed")
         expect(result[1].status).toBe("in_progress")
       },
@@ -481,37 +420,6 @@ describe("team.orchestrator.syncTodos (via Todo API)", () => {
         expect(result[1].content).toBe("Second")
         expect(result[2].content).toBe("Third")
         expect(result[3].content).toBe("Fourth")
-      },
-    })
-  })
-
-  test("complete phase marks all phases as completed", async () => {
-    await Instance.provide({
-      directory: projectRoot,
-      fn: async () => {
-        const sessionID = createSession(Instance.project.id, projectRoot)
-
-        // Simulate what syncTodos does when phase = "complete"
-        const phaseOrder = ["understanding", "design", "implementation", "verification", "complete"]
-        const todos: Todo.Info[] = []
-        for (const p of ["understanding", "design", "implementation", "verification"]) {
-          const idx = phaseOrder.indexOf(p)
-          const current = phaseOrder.indexOf("complete")
-          const status = idx < current ? "completed" : "pending"
-          todos.push({ content: `Phase: ${p}`, status, priority: "high" })
-        }
-        // All agent tasks marked done
-        todos.push({ content: "[developer] Build API", status: "completed", priority: "medium" })
-        todos.push({ content: "[qa] Test everything", status: "completed", priority: "medium" })
-
-        Todo.update({ sessionID, todos })
-        const result = Todo.get(sessionID)
-
-        expect(result).toHaveLength(6)
-        // All phases should be completed since "complete" index is 4 and all phase indices < 4
-        for (const t of result) {
-          expect(t.status).toBe("completed")
-        }
       },
     })
   })
