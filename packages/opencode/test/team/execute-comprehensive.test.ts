@@ -552,3 +552,234 @@ describe("team.execute.extractAssistantText", () => {
     expect(Execute.extractAssistantText({ foo: "bar" })).toBe("[object Object]")
   })
 })
+
+describe("Execute.summarizeToolCalls", () => {
+  test("returns empty string for no calls", () => {
+    expect(Execute.summarizeToolCalls([])).toBe("")
+  })
+
+  test("summarizes file modifications", () => {
+    const calls: Execute.ToolCallInfo[] = [
+      { tool: "edit", title: "Edit file", input: { filePath: "src/auth.ts" }, output: "ok" },
+      { tool: "write", title: "Write file", input: { filePath: "src/utils.ts" }, output: "ok" },
+    ]
+    const result = Execute.summarizeToolCalls(calls)
+    expect(result).toContain("src/auth.ts")
+    expect(result).toContain("src/utils.ts")
+    expect(result).toContain("Modified files")
+  })
+
+  test("summarizes bash commands", () => {
+    const calls: Execute.ToolCallInfo[] = [
+      { tool: "bash", title: "Run tests", input: { command: "bun test" }, output: "ok" },
+    ]
+    const result = Execute.summarizeToolCalls(calls)
+    expect(result).toContain("bun test")
+    expect(result).toContain("Commands")
+  })
+
+  test("summarizes mixed tool calls", () => {
+    const calls: Execute.ToolCallInfo[] = [
+      { tool: "edit", title: "Edit", input: { filePath: "src/main.ts" }, output: "ok" },
+      { tool: "bash", title: "Build", input: { command: "npm run build" }, output: "ok" },
+    ]
+    const result = Execute.summarizeToolCalls(calls)
+    expect(result).toContain("src/main.ts")
+    expect(result).toContain("npm run build")
+  })
+
+  test("deduplicates file paths", () => {
+    const calls: Execute.ToolCallInfo[] = [
+      { tool: "edit", title: "First edit", input: { filePath: "src/main.ts" }, output: "ok" },
+      { tool: "edit", title: "Second edit", input: { filePath: "src/main.ts" }, output: "ok" },
+    ]
+    const result = Execute.summarizeToolCalls(calls)
+    const count = (result.match(/src\/main\.ts/g) ?? []).length
+    expect(count).toBe(1)
+  })
+
+  test("falls back to count when no files or commands", () => {
+    const calls: Execute.ToolCallInfo[] = [
+      { tool: "apply_patch", title: "Patch", input: { patch: "..." }, output: "ok" },
+    ]
+    const result = Execute.summarizeToolCalls(calls)
+    expect(result).toContain("1 tool call(s)")
+  })
+
+  test("truncates long commands", () => {
+    const calls: Execute.ToolCallInfo[] = [
+      { tool: "bash", title: "Long cmd", input: { command: "a".repeat(200) }, output: "ok" },
+    ]
+    const result = Execute.summarizeToolCalls(calls)
+    expect(result.length).toBeLessThan(300)
+  })
+})
+
+describe("Execute.parseOutput toolCalls default", () => {
+  test("parseOutput returns empty toolCalls array", () => {
+    const result = Execute.parseOutput("Hello world")
+    expect(result.toolCalls).toEqual([])
+  })
+
+  test("parseOutput with tags still returns empty toolCalls", () => {
+    const result = Execute.parseOutput("[COMPLETE] Done")
+    expect(result.toolCalls).toEqual([])
+    expect(result.complete).toBe(true)
+  })
+})
+
+describe("Execute.parseOutput edge cases", () => {
+  test("[CONCERN: topic] with body text after bracket", () => {
+    const text = "[CONCERN: security]\nAdditional details about the vulnerability.\n"
+    const result = Execute.parseOutput(text)
+    expect(result.concerns).toHaveLength(1)
+    expect(result.concerns[0]).toContain("security")
+    expect(result.concerns[0]).toContain("Additional details")
+  })
+
+  test("[DECISION] acts as terminator for preceding tag", () => {
+    const text = "[PROPOSAL]\nUse REST API.\n\n[DECISION]\nApproved."
+    const result = Execute.parseOutput(text)
+    expect(result.proposals).toHaveLength(1)
+    expect(result.proposals[0]).not.toContain("Approved")
+  })
+
+  test("both [COMPLETE] and [APPROVED] in same text", () => {
+    const text = "[COMPLETE]\nAll done.\n\n[APPROVED]\nLooks good."
+    const result = Execute.parseOutput(text)
+    expect(result.complete).toBe(true)
+    expect(result.approved).toBe(true)
+    expect(result.completeSummary).toBe("All done.")
+  })
+
+  test("[CONCERN] with no body after bracket", () => {
+    const text = "[CONCERN: memory leak]\n"
+    const result = Execute.parseOutput(text)
+    expect(result.concerns).toHaveLength(1)
+    expect(result.concerns[0]).toBe("memory leak")
+  })
+})
+
+describe("Execute.extractAssistantText edge cases", () => {
+  test("does NOT handle parts array (unlike Orchestrator.extractText)", () => {
+    const result = Execute.extractAssistantText({
+      parts: [{ type: "text", text: "hello" }],
+    })
+    // extractAssistantText does not handle the parts structure — falls through to String()
+    expect(result).toBe("[object Object]")
+  })
+
+  test("handles empty object", () => {
+    expect(Execute.extractAssistantText({})).toBe("[object Object]")
+  })
+
+  test("handles object with numeric text field", () => {
+    expect(Execute.extractAssistantText({ text: 42 })).toBe("[object Object]")
+  })
+})
+
+describe("Execute.summarizeToolCalls edge cases", () => {
+  test("extracts file from input.file instead of input.filePath", () => {
+    const calls: Execute.ToolCallInfo[] = [
+      { tool: "write", title: "Write", input: { file: "src/new.ts" }, output: "ok" },
+    ]
+    const result = Execute.summarizeToolCalls(calls)
+    expect(result).toContain("src/new.ts")
+    expect(result).toContain("Modified files")
+  })
+
+  test("extracts file from input.path instead of input.filePath", () => {
+    const calls: Execute.ToolCallInfo[] = [{ tool: "edit", title: "Edit", input: { path: "src/old.ts" }, output: "ok" }]
+    const result = Execute.summarizeToolCalls(calls)
+    expect(result).toContain("src/old.ts")
+  })
+
+  test("extracts command from input.cmd instead of input.command", () => {
+    const calls: Execute.ToolCallInfo[] = [{ tool: "bash", title: "Run", input: { cmd: "npm test" }, output: "ok" }]
+    const result = Execute.summarizeToolCalls(calls)
+    expect(result).toContain("npm test")
+    expect(result).toContain("Commands")
+  })
+
+  test("coerces non-string file value via String()", () => {
+    const calls: Execute.ToolCallInfo[] = [
+      { tool: "edit", title: "Edit", input: { filePath: 42 as any }, output: "ok" },
+    ]
+    const result = Execute.summarizeToolCalls(calls)
+    expect(result).toContain("42")
+  })
+
+  test("coerces non-string command value via String()", () => {
+    const calls: Execute.ToolCallInfo[] = [{ tool: "bash", title: "Run", input: { command: 123 as any }, output: "ok" }]
+    const result = Execute.summarizeToolCalls(calls)
+    expect(result).toContain("123")
+  })
+
+  test("multiedit tool calls fall through to generic count (no file extraction)", () => {
+    const calls: Execute.ToolCallInfo[] = [
+      { tool: "multiedit", title: "Multi edit", input: { edits: [] }, output: "ok" },
+    ]
+    const result = Execute.summarizeToolCalls(calls)
+    // multiedit is in ACTION_TOOLS but not in summarize's file extraction list
+    expect(result).toContain("1 tool call(s)")
+  })
+
+  test("patch tool extracts file path", () => {
+    const calls: Execute.ToolCallInfo[] = [
+      { tool: "patch", title: "Patch", input: { filePath: "src/fix.ts" }, output: "ok" },
+    ]
+    const result = Execute.summarizeToolCalls(calls)
+    expect(result).toContain("src/fix.ts")
+  })
+
+  test("apply_patch tool extracts file path", () => {
+    const calls: Execute.ToolCallInfo[] = [
+      { tool: "apply_patch", title: "Apply", input: { filePath: "src/diff.ts" }, output: "ok" },
+    ]
+    const result = Execute.summarizeToolCalls(calls)
+    expect(result).toContain("src/diff.ts")
+  })
+})
+
+describe("Execute.extractToolCalls", () => {
+  test("returns empty array for non-existent session", async () => {
+    // extractToolCalls catches errors and returns []
+    const result = await Execute.extractToolCalls("session_nonexistent_1234")
+    expect(result).toEqual([])
+  })
+})
+
+describe("Execute.buildContext edge cases", () => {
+  test("returns empty decisions when workspace has none", async () => {
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const teamID = createTeamSession(Instance.project.id)
+        const agentID = insertAgent(teamID, "developer")
+        Workspace.create(teamID, "Test")
+
+        const agent = Roster.getByID(agentID)!
+        const ctx = Execute.buildContext(agent, teamID)
+        expect(ctx.decisions).toEqual([])
+      },
+    })
+  })
+
+  test("returns empty openQuestions when none routed to agent", async () => {
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const teamID = createTeamSession(Instance.project.id)
+        const agentID = insertAgent(teamID, "developer")
+        Workspace.create(teamID, "Test")
+
+        // Add question routed to a different role
+        Workspace.addQuestion(teamID, { question: "For arch", asked_by: "dev", routed_to: "architect", status: "open" })
+
+        const agent = Roster.getByID(agentID)!
+        const ctx = Execute.buildContext(agent, teamID)
+        expect(ctx.openQuestions).toEqual([])
+      },
+    })
+  })
+})

@@ -328,3 +328,39 @@ describe("team.roles.match", () => {
     // Should also match performance and/or database specialists
   })
 })
+
+describe("team.roles.register visibility", () => {
+  test("registered role appears in list()", () => {
+    Roles.register({
+      role: "test-role-list",
+      prompt: "You are a test role",
+      description: "For testing list visibility",
+      expertise: ["testing"],
+      workspaceRead: ["goal"],
+      workspaceWrite: ["artifacts"],
+      signals: ["test-signal-unique"],
+    })
+
+    const all = Roles.list()
+    const found = all.find((r) => r.role === "test-role-list")
+    expect(found).toBeDefined()
+    expect(found!.description).toBe("For testing list visibility")
+  })
+
+  test("registered role with signals is matchable via match()", () => {
+    Roles.register({
+      role: "test-role-match",
+      prompt: "matcher",
+      description: "For testing match",
+      expertise: ["matching"],
+      workspaceRead: [],
+      workspaceWrite: [],
+      signals: ["unique-signal-alpha", "unique-signal-beta"],
+    })
+
+    const matches = Roles.match("We need unique-signal-alpha and unique-signal-beta capabilities.", [])
+    const found = matches.find((m) => m.role === "test-role-match")
+    expect(found).toBeDefined()
+    expect(found!.score).toBeGreaterThanOrEqual(2)
+  })
+})

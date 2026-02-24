@@ -5,18 +5,24 @@ import { TeamSessionTable } from "./team.sql"
 import { Workspace } from "./workspace"
 import { Roster } from "./roster"
 import { TeamMessage } from "./message"
-import { Orchestrator } from "./orchestrator"
 import { Session } from "@/session"
 import { Instance } from "@/project/instance"
 import { Bus } from "@/bus"
 import { BusEvent } from "@/bus/bus-event"
 import { Log } from "@/util/log"
 
+// Lazy import to break circular dependency:
+// orchestrator.ts -> prompt.ts -> registry.ts -> team.ts -> team/index.ts -> orchestrator.ts
+function orchestrator() {
+  return require("./orchestrator").Orchestrator as typeof import("./orchestrator").Orchestrator
+}
+
 export namespace Team {
   const log = Log.create({ service: "team" })
 
-  export const Phase = Orchestrator.Phase
-  export type Phase = Orchestrator.Phase
+  // Defined inline (not re-exported from Orchestrator) to avoid circular dependency
+  export const Phase = z.enum(["understanding", "design", "implementation", "verification", "complete"])
+  export type Phase = z.infer<typeof Phase>
 
   export const Status = z.enum(["active", "waiting_user", "complete", "cancelled"])
   export type Status = z.infer<typeof Status>
@@ -132,37 +138,40 @@ export namespace Team {
   export async function start(input: {
     goal: string
     sharingStrategy?: "selective" | "hierarchical" | "broadcast"
+    parentSessionID?: string
     onEscalate: (question: string) => Promise<string>
     onStatus?: (message: string) => void
     abort?: AbortSignal
   }): Promise<{ teamSession: Info; summary: string }> {
     const teamSession = await create({ goal: input.goal, sharingStrategy: input.sharingStrategy })
 
-    // Create a session for the orchestrator itself
+    // Create a session for the orchestrator itself (child of calling session)
     const orchestratorSession = await Session.create({
+      parentID: input.parentSessionID,
       title: `Team orchestrator: ${input.goal.slice(0, 50)}`,
     })
 
     let summary = ""
 
-    await Orchestrator.run({
+    await orchestrator().run({
       teamSessionID: teamSession.id,
       orchestratorSessionID: orchestratorSession.id,
+      parentSessionID: input.parentSessionID,
       goal: input.goal,
       phase: teamSession.phase,
       sharingStrategy: input.sharingStrategy,
       abort: input.abort,
-      onEscalate: async (question) => {
+      onEscalate: async (question: string) => {
         setStatus(teamSession.id, "waiting_user")
         const answer = await input.onEscalate(question)
         setStatus(teamSession.id, "active")
         return answer
       },
-      onPhaseChange: (phase) => {
+      onPhaseChange: (phase: Phase) => {
         setPhase(teamSession.id, phase)
         input.onStatus?.(`Phase: ${phase}`)
       },
-      onComplete: (s) => {
+      onComplete: (s: string) => {
         summary = s
         setStatus(teamSession.id, "complete")
         setPhase(teamSession.id, "complete")
@@ -194,6 +203,11 @@ export namespace Team {
     const questions = Workspace.openQuestions(teamSessionID)
     const summary = Workspace.summary(teamSessionID)
 
+    // Extract file changes and commands from workspace artifacts
+    const artifacts = (Workspace.get(teamSessionID, "artifacts") as Record<string, unknown>) ?? {}
+    const modifiedFiles = (artifacts.modified_files as string[]) ?? []
+    const commandsRun = (artifacts.commands_run as Array<{ command: string; output: string; title: string }>) ?? []
+
     return {
       info,
       roster: roster.map((a) => ({ role: a.role, status: a.status, expertise: a.expertise })),
@@ -205,6 +219,8 @@ export namespace Team {
       })),
       openQuestions: questions,
       workspaceSummary: summary,
+      modifiedFiles,
+      commandsRun,
     }
   }
 }

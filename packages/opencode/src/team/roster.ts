@@ -71,6 +71,7 @@ export namespace Roster {
 
   export async function spawn(input: {
     teamSessionID: string
+    parentSessionID?: string
     role: string
     prompt: string
     expertise: string[]
@@ -79,7 +80,7 @@ export namespace Roster {
     relationships: Relationships
   }): Promise<Info> {
     const session = await Session.create({
-      parentID: undefined,
+      parentID: input.parentSessionID,
       title: `Team agent: ${input.role}`,
     })
 

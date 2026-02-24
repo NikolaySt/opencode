@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import path from "path"
 import { Instance } from "../../src/project/instance"
+import { Session } from "../../src/session"
 import { Roster } from "../../src/team/roster"
 import { Identifier } from "../../src/id/id"
 import { Database } from "../../src/storage/db"
@@ -515,6 +516,27 @@ describe("team.roster.shouldRetire", () => {
     expect(result.retire).toBe(false)
     expect(result.reason).toContain("2 active review")
   })
+
+  test("returns retire=true for waiting agent with no active reviews", () => {
+    const agent: Roster.Info = {
+      id: "agt_1",
+      teamSessionID: "team_1",
+      role: "developer",
+      prompt: "test",
+      expertise: [],
+      workspaceRead: [],
+      workspaceWrite: [],
+      relationships: { collaborates_with: [], reviews: [], reviewed_by: [] },
+      status: "waiting",
+      stepsUsed: 0,
+      tokensConsumed: 0,
+      time: { created: 0, updated: 0 },
+    }
+
+    const result = Roster.shouldRetire(agent, [])
+    expect(result.retire).toBe(true)
+    expect(result.reason).toContain("no active tasks")
+  })
 })
 
 describe("team.roster.Info schema", () => {
@@ -550,5 +572,175 @@ describe("team.roster.Info schema", () => {
 
   test("Status rejects invalid values", () => {
     expect(() => Roster.Status.parse("invalid")).toThrow()
+  })
+})
+
+describe("team.roster.spawn with parentSessionID", () => {
+  test("creates child session with parentID when parentSessionID is provided", async () => {
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const parentSession = await Session.create({ title: "parent-session" })
+        const teamID = createTeamSession(Instance.project.id)
+
+        const agent = await Roster.spawn({
+          teamSessionID: teamID,
+          parentSessionID: parentSession.id,
+          role: "developer",
+          prompt: "You are a developer",
+          expertise: ["typescript"],
+          workspaceRead: ["goal"],
+          workspaceWrite: ["artifacts"],
+          relationships: { collaborates_with: [], reviews: [], reviewed_by: [] },
+        })
+
+        expect(agent.sessionID).toBeDefined()
+
+        // Verify the agent's session is a child of the parent
+        const agentSession = await Session.get(agent.sessionID!)
+        expect(agentSession).toBeDefined()
+        expect(agentSession!.parentID).toBe(parentSession.id)
+      },
+    })
+  })
+
+  test("creates root session when parentSessionID is omitted", async () => {
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const teamID = createTeamSession(Instance.project.id)
+
+        const agent = await Roster.spawn({
+          teamSessionID: teamID,
+          role: "architect",
+          prompt: "You are an architect",
+          expertise: ["design"],
+          workspaceRead: ["goal"],
+          workspaceWrite: ["plan"],
+          relationships: { collaborates_with: [], reviews: [], reviewed_by: [] },
+        })
+
+        expect(agent.sessionID).toBeDefined()
+
+        // Without parentSessionID, session should have no parent
+        const agentSession = await Session.get(agent.sessionID!)
+        expect(agentSession).toBeDefined()
+        expect(agentSession!.parentID).toBeUndefined()
+      },
+    })
+  })
+
+  test("child sessions appear in Session.children()", async () => {
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const parentSession = await Session.create({ title: "team-parent" })
+        const teamID = createTeamSession(Instance.project.id)
+
+        await Roster.spawn({
+          teamSessionID: teamID,
+          parentSessionID: parentSession.id,
+          role: "developer",
+          prompt: "dev",
+          expertise: ["ts"],
+          workspaceRead: ["goal"],
+          workspaceWrite: ["artifacts"],
+          relationships: { collaborates_with: [], reviews: [], reviewed_by: [] },
+        })
+
+        await Roster.spawn({
+          teamSessionID: teamID,
+          parentSessionID: parentSession.id,
+          role: "qa",
+          prompt: "qa",
+          expertise: ["testing"],
+          workspaceRead: ["goal"],
+          workspaceWrite: ["artifacts"],
+          relationships: { collaborates_with: [], reviews: [], reviewed_by: [] },
+        })
+
+        const children = await Session.children(parentSession.id)
+        expect(children).toHaveLength(2)
+        const titles = children.map((c) => c.title)
+        expect(titles).toContain("Team agent: developer")
+        expect(titles).toContain("Team agent: qa")
+      },
+    })
+  })
+
+  test("spawned agent session title uses role name", async () => {
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const teamID = createTeamSession(Instance.project.id)
+
+        const agent = await Roster.spawn({
+          teamSessionID: teamID,
+          role: "security-reviewer",
+          prompt: "You are a security reviewer",
+          expertise: ["OWASP"],
+          workspaceRead: ["goal"],
+          workspaceWrite: ["artifacts"],
+          relationships: { collaborates_with: [], reviews: [], reviewed_by: [] },
+        })
+
+        const session = await Session.get(agent.sessionID!)
+        expect(session!.title).toBe("Team agent: security-reviewer")
+      },
+    })
+  })
+
+  test("emits Spawned bus event", async () => {
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const teamID = createTeamSession(Instance.project.id)
+
+        let received = false
+        const unsub = Bus.subscribe(Roster.Event.Spawned, (event) => {
+          received = true
+          expect(event.properties.info.role).toBe("observer")
+          expect(event.properties.info.status).toBe("idle")
+        })
+
+        await Roster.spawn({
+          teamSessionID: teamID,
+          role: "observer",
+          prompt: "observer",
+          expertise: [],
+          workspaceRead: [],
+          workspaceWrite: [],
+          relationships: { collaborates_with: [], reviews: [], reviewed_by: [] },
+        })
+        await new Promise((r) => setTimeout(r, 50))
+
+        unsub()
+        expect(received).toBe(true)
+      },
+    })
+  })
+
+  test("spawned agent records sessionID in DB", async () => {
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const teamID = createTeamSession(Instance.project.id)
+
+        const agent = await Roster.spawn({
+          teamSessionID: teamID,
+          role: "developer",
+          prompt: "dev",
+          expertise: [],
+          workspaceRead: [],
+          workspaceWrite: [],
+          relationships: { collaborates_with: [], reviews: [], reviewed_by: [] },
+        })
+
+        // Verify sessionID is persisted and retrievable
+        const retrieved = Roster.getByID(agent.id)
+        expect(retrieved).toBeDefined()
+        expect(retrieved!.sessionID).toBe(agent.sessionID)
+      },
+    })
   })
 })

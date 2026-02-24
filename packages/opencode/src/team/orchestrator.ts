@@ -9,6 +9,7 @@ import { Log } from "@/util/log"
 import { Bus } from "@/bus"
 import { BusEvent } from "@/bus/bus-event"
 import { SessionPrompt } from "@/session/prompt"
+import { Todo } from "@/session/todo"
 import z from "zod"
 
 import PROMPT_ORCHESTRATOR from "./prompt/orchestrator.txt"
@@ -125,6 +126,47 @@ export namespace Orchestrator {
 
   const PHASE_ORDER: Phase[] = ["understanding", "design", "implementation", "verification", "complete"]
 
+  /**
+   * Track team progress as TODOs on the parent session so the sidebar
+   * shows a live task list. Each phase becomes a TODO, and assigned
+   * agent tasks become sub-items.
+   */
+  interface TaskEntry {
+    role: string
+    task: string
+    done: boolean
+  }
+
+  function syncTodos(parentSessionID: string | undefined, phase: Phase, tasks: TaskEntry[]) {
+    if (!parentSessionID) return
+
+    const todos: Todo.Info[] = []
+
+    // Phase progress
+    for (const p of PHASE_ORDER) {
+      if (p === "complete") continue
+      const idx = PHASE_ORDER.indexOf(p)
+      const current = PHASE_ORDER.indexOf(phase)
+      const status = idx < current ? "completed" : idx === current ? "in_progress" : "pending"
+      todos.push({
+        content: `Phase: ${p}`,
+        status,
+        priority: "high",
+      })
+    }
+
+    // Agent tasks
+    for (const t of tasks) {
+      todos.push({
+        content: `[${t.role}] ${t.task.slice(0, 80)}`,
+        status: t.done ? "completed" : "in_progress",
+        priority: "medium",
+      })
+    }
+
+    Todo.update({ sessionID: parentSessionID, todos })
+  }
+
   export function forceAdvance(current: Phase): Phase | undefined {
     const idx = PHASE_ORDER.indexOf(current)
     if (idx < 0 || idx >= PHASE_ORDER.length - 1) return undefined
@@ -199,6 +241,29 @@ export namespace Orchestrator {
       parts.push("")
     }
 
+    // Surface file changes and tool activity from agents
+    const toolMessages = messages.filter((m) => m.content.startsWith("[TOOLS]"))
+    if (toolMessages.length) {
+      parts.push("## Agent Tool Activity")
+      for (const m of toolMessages.slice(-10)) {
+        parts.push(`- ${m.fromRole}: ${m.content.slice(8).trim()}`)
+      }
+      parts.push("")
+    }
+
+    // Show modified files from workspace artifacts
+    const artifacts = Workspace.get(teamSessionID, "artifacts") as Record<string, unknown> | undefined
+    if (artifacts) {
+      const modified = artifacts.modified_files as string[] | undefined
+      if (modified?.length) {
+        parts.push("## Modified Files")
+        for (const f of modified) {
+          parts.push(`- ${f}`)
+        }
+        parts.push("")
+      }
+    }
+
     if (messages.length) {
       parts.push("## Recent Activity")
       for (const m of messages.slice(-15)) {
@@ -231,6 +296,7 @@ export namespace Orchestrator {
   export async function run(input: {
     teamSessionID: string
     orchestratorSessionID: string
+    parentSessionID?: string
     goal: string
     phase: Phase
     sharingStrategy?: "selective" | "hierarchical" | "broadcast"
@@ -243,8 +309,12 @@ export namespace Orchestrator {
     let totalSteps = 0
     let phaseSteps = 0
     const maxTotalSteps = 100
+    const agentTasks: TaskEntry[] = []
 
     log.info("starting orchestrator loop", { teamSessionID: input.teamSessionID, goal: input.goal })
+
+    // Initial TODO state
+    syncTodos(input.parentSessionID, phase, agentTasks)
 
     while (phase !== "complete" && totalSteps < maxTotalSteps) {
       if (input.abort?.aborted) break
@@ -331,6 +401,7 @@ export namespace Orchestrator {
             const template = Roles.get(spec.role)
             await Roster.spawn({
               teamSessionID: input.teamSessionID,
+              parentSessionID: input.parentSessionID,
               role: spec.role,
               prompt: template?.prompt ?? "",
               expertise: spec.expertise,
@@ -343,7 +414,9 @@ export namespace Orchestrator {
                 reviewed_by: [],
               },
             })
+            agentTasks.push({ role: spec.role, task: spec.task, done: false })
           }
+          syncTodos(input.parentSessionID, phase, agentTasks)
           // After staffing, assign initial tasks
           for (const spec of action.roles) {
             const agent = Roster.get(input.teamSessionID, spec.role)
@@ -357,6 +430,10 @@ export namespace Orchestrator {
               input.sharingStrategy,
             )
             await processAgentResult(input.teamSessionID, agent, agentResult)
+            // Mark task done after agent completes
+            const entry = agentTasks.find((t) => t.role === spec.role && !t.done)
+            if (entry) entry.done = true
+            syncTodos(input.parentSessionID, phase, agentTasks)
           }
           break
         }
@@ -367,6 +444,8 @@ export namespace Orchestrator {
             log.warn("agent not found for assignment", { role: action.role })
             break
           }
+          agentTasks.push({ role: action.role, task: action.task, done: false })
+          syncTodos(input.parentSessionID, phase, agentTasks)
           const agentResult = await Execute.run(
             agent,
             action.task,
@@ -376,6 +455,9 @@ export namespace Orchestrator {
             input.sharingStrategy,
           )
           await processAgentResult(input.teamSessionID, agent, agentResult)
+          const assignEntry = agentTasks.find((t) => t.role === action.role && !t.done)
+          if (assignEntry) assignEntry.done = true
+          syncTodos(input.parentSessionID, phase, agentTasks)
           break
         }
 
@@ -383,6 +465,7 @@ export namespace Orchestrator {
           const template = Roles.get(action.role)
           await Roster.spawn({
             teamSessionID: input.teamSessionID,
+            parentSessionID: input.parentSessionID,
             role: action.role,
             prompt: template?.prompt ?? "",
             expertise: action.expertise,
@@ -414,15 +497,21 @@ export namespace Orchestrator {
           // Immediately assign the target agent to answer
           const target = Roster.get(input.teamSessionID, action.to)
           if (target) {
+            const routeTask = `Answer question from ${action.from}: ${action.question}`
+            agentTasks.push({ role: action.to, task: routeTask.slice(0, 80), done: false })
+            syncTodos(input.parentSessionID, phase, agentTasks)
             const agentResult = await Execute.run(
               target,
-              `Answer this question from ${action.from}: ${action.question}`,
+              routeTask,
               input.teamSessionID,
               input.goal,
               phase,
               input.sharingStrategy,
             )
             await processAgentResult(input.teamSessionID, target, agentResult)
+            const routeEntry = agentTasks.find((t) => t.role === action.to && !t.done)
+            if (routeEntry) routeEntry.done = true
+            syncTodos(input.parentSessionID, phase, agentTasks)
           }
           break
         }
@@ -463,6 +552,7 @@ export namespace Orchestrator {
             type: "status",
             content: `Phase advanced to ${phase}: ${action.summary}`,
           })
+          syncTodos(input.parentSessionID, phase, agentTasks)
           break
         }
 
@@ -517,6 +607,9 @@ export namespace Orchestrator {
             type: "status",
             content: `Team session complete: ${action.summary}`,
           })
+          // Mark all tasks and phases done
+          for (const t of agentTasks) t.done = true
+          syncTodos(input.parentSessionID, phase, agentTasks)
           break
         }
       }
@@ -602,12 +695,49 @@ export namespace Orchestrator {
       })
     }
 
-    if (result.complete) {
+    // Surface tool calls as a status message so the orchestrator knows what actually happened
+    if (result.toolCalls.length) {
+      const summary = Execute.summarizeToolCalls(result.toolCalls)
       TeamMessage.send({
         teamSessionID,
         fromRole: agent.role,
         type: "status",
-        content: `[COMPLETE] ${result.completeSummary ?? "Task finished."}`,
+        content: `[TOOLS] ${summary}`,
+      })
+
+      // Record file modifications in workspace artifacts
+      const files = result.toolCalls
+        .filter((c) => c.tool !== "bash")
+        .map((c) => c.input.filePath ?? c.input.file ?? c.input.path)
+        .filter(Boolean)
+      if (files.length) {
+        const current = (Workspace.get(teamSessionID, "artifacts") as Record<string, unknown>) ?? {}
+        const modified = ((current.modified_files as string[]) ?? []).concat(files.map((f: unknown) => String(f)))
+        Workspace.set(teamSessionID, "artifacts", { ...current, modified_files: [...new Set(modified)] }, agent.role)
+      }
+
+      // Record bash commands that were run
+      const commands = result.toolCalls
+        .filter((c) => c.tool === "bash")
+        .map((c) => ({
+          command: String(c.input.command ?? c.input.cmd ?? "").slice(0, 120),
+          output: c.output.slice(0, 200),
+          title: c.title,
+        }))
+      if (commands.length) {
+        const current = (Workspace.get(teamSessionID, "artifacts") as Record<string, unknown>) ?? {}
+        const existing = (current.commands_run as Array<{ command: string; output: string; title: string }>) ?? []
+        Workspace.set(teamSessionID, "artifacts", { ...current, commands_run: [...existing, ...commands] }, agent.role)
+      }
+    }
+
+    if (result.complete) {
+      const toolSuffix = result.toolCalls.length > 0 ? ` (${result.toolCalls.length} tool calls executed)` : ""
+      TeamMessage.send({
+        teamSessionID,
+        fromRole: agent.role,
+        type: "status",
+        content: `[COMPLETE] ${result.completeSummary ?? "Task finished."}${toolSuffix}`,
       })
     }
 

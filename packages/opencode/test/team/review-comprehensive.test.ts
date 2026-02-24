@@ -542,3 +542,52 @@ describe("team.review schemas", () => {
     expect(info.artifactRef).toBe("code v1")
   })
 })
+
+describe("team.review.escalate edge cases", () => {
+  test("returns undefined for non-existent review", async () => {
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const result = Review.escalate("rvw_nonexistent", "reason")
+        expect(result).toBeUndefined()
+      },
+    })
+  })
+
+  test("does not emit Escalated event for non-existent review", async () => {
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        let received = false
+        const unsub = Bus.subscribe(Review.Event.Escalated, () => {
+          received = true
+        })
+
+        Review.escalate("rvw_nonexistent", "reason")
+        await new Promise((r) => setTimeout(r, 50))
+
+        unsub()
+        expect(received).toBe(false)
+      },
+    })
+  })
+
+  test("approve returns undefined for non-existent review without emitting Completed event", async () => {
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        let received = false
+        const unsub = Bus.subscribe(Review.Event.Completed, () => {
+          received = true
+        })
+
+        const result = Review.approve("rvw_nonexistent")
+        expect(result).toBeUndefined()
+        await new Promise((r) => setTimeout(r, 50))
+
+        unsub()
+        expect(received).toBe(false)
+      },
+    })
+  })
+})

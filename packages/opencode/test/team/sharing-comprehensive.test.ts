@@ -691,3 +691,123 @@ describe("sharing.broadcast.summarize", () => {
     })
   })
 })
+
+describe("sharing propagate with unsupported operations", () => {
+  test("selective propagate with 'remove' op: added to updated but data unchanged", async () => {
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const teamID = createTeamSession(Instance.project.id)
+        const agentID = insertAgent(teamID, "developer", { write: ["artifacts"] })
+        Workspace.create(teamID, "Test")
+
+        Workspace.set(teamID, "artifacts", { keep: "this" })
+        const agent = Roster.getByID(agentID)!
+        const result = selective.propagate({
+          agent,
+          teamSessionID: teamID,
+          output: "output",
+          mutations: [{ section: "artifacts", operation: "remove", path: "keep", value: "this" }],
+        })
+
+        // "remove" passes write-permission check so section is pushed to updated,
+        // but the data is NOT actually modified (no "remove" handler)
+        expect(result.updated).toContain("artifacts")
+        const artifacts = Workspace.get(teamID, "artifacts") as Record<string, unknown>
+        expect(artifacts.keep).toBe("this")
+      },
+    })
+  })
+
+  test("hierarchical ignores 'update' operation mutation", async () => {
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const teamID = createTeamSession(Instance.project.id)
+        const agentID = insertAgent(teamID, "developer", { write: ["plan"] })
+        Workspace.create(teamID, "Test")
+
+        const agent = Roster.getByID(agentID)!
+        const result = hierarchical.propagate({
+          agent,
+          teamSessionID: teamID,
+          output: "output",
+          mutations: [{ section: "plan", operation: "update", path: "status", value: "approved" }],
+        })
+
+        // "update" is not handled — section still gets pushed to updated (because the push is after the if/else)
+        // Actually examining the source: push happens AFTER the if/else block for all mutations
+        // So "update" will add to updated[] but NOT actually modify the workspace
+        expect(result.updated).toContain("plan")
+      },
+    })
+  })
+
+  test("broadcast ignores 'remove' operation mutation", async () => {
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const teamID = createTeamSession(Instance.project.id)
+        const agentID = insertAgent(teamID, "developer")
+        Workspace.create(teamID, "Test")
+
+        Workspace.set(teamID, "artifacts", { data: "keep" })
+        const agent = Roster.getByID(agentID)!
+        const result = broadcast.propagate({
+          agent,
+          teamSessionID: teamID,
+          output: "output",
+          mutations: [{ section: "artifacts", operation: "remove", path: "data", value: "keep" }],
+        })
+
+        // "remove" not handled but push still adds to updated
+        expect(result.updated).toContain("artifacts")
+        // Data should be unchanged since "remove" wasn't actually applied
+        const artifacts = Workspace.get(teamID, "artifacts") as Record<string, unknown>
+        expect(artifacts.data).toBe("keep")
+      },
+    })
+  })
+})
+
+describe("sharing.selective.buildContext empty section filtering", () => {
+  test("excludes empty array/object sections from detailed view", async () => {
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const teamID = createTeamSession(Instance.project.id)
+        // Agent has read access to constraints (empty array) and artifacts (empty object)
+        const agentID = insertAgent(teamID, "developer", { read: ["constraints", "artifacts"] })
+        Workspace.create(teamID, "Test")
+
+        const agent = Roster.getByID(agentID)!
+        const ctx = selective.buildContext({ agent, teamSessionID: teamID, teamGoal: "goal", phase: "design" })
+
+        // Empty arrays and objects should be filtered out
+        expect(ctx).not.toContain("## constraints (detail)")
+        expect(ctx).not.toContain("## artifacts (detail)")
+      },
+    })
+  })
+})
+
+describe("sharing.broadcast.buildContext empty section filtering", () => {
+  test("excludes empty array/object sections", async () => {
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const teamID = createTeamSession(Instance.project.id)
+        const agentID = insertAgent(teamID, "developer")
+        Workspace.create(teamID, "Test")
+
+        const agent = Roster.getByID(agentID)!
+        const ctx = broadcast.buildContext({ agent, teamSessionID: teamID, teamGoal: "goal", phase: "design" })
+
+        // Should include goal (non-empty string)
+        expect(ctx).toContain("## goal")
+        // constraints is [] by default — should be excluded
+        expect(ctx).not.toMatch(/## constraints\n\[\]/)
+      },
+    })
+  })
+})

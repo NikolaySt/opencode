@@ -1,4 +1,5 @@
 import { SessionPrompt } from "@/session/prompt"
+import { Session } from "@/session"
 import { Workspace } from "./workspace"
 import { Roster } from "./roster"
 import { TeamMessage } from "./message"
@@ -8,6 +9,16 @@ import { resolve } from "./sharing/strategy"
 
 export namespace Execute {
   const log = Log.create({ service: "team-execute" })
+
+  /** Tools that represent actual work (file changes, command execution) */
+  const ACTION_TOOLS = new Set(["bash", "edit", "write", "patch", "multiedit", "apply_patch"])
+
+  export interface ToolCallInfo {
+    tool: string
+    title: string
+    input: Record<string, any>
+    output: string
+  }
 
   export interface AgentContext {
     workspaceSummary: string
@@ -27,6 +38,7 @@ export namespace Execute {
     completeSummary?: string
     critiques: string[]
     approved: boolean
+    toolCalls: ToolCallInfo[]
   }
 
   export function buildContext(agent: Roster.Info, teamSessionID: string): AgentContext {
@@ -146,6 +158,18 @@ export namespace Execute {
       const text = extractAssistantText(result)
       const parsed = parseOutput(text)
 
+      // Extract tool calls from the agent's session
+      const toolCalls = await extractToolCalls(agent.sessionID)
+      parsed.toolCalls = toolCalls
+
+      if (toolCalls.length) {
+        log.info("agent tool activity", {
+          role: agent.role,
+          tools: toolCalls.map((t) => t.tool),
+          count: toolCalls.length,
+        })
+      }
+
       // Run propagation if using a sharing strategy
       if (strategyName) {
         const strategy = resolve(strategyName)
@@ -153,7 +177,7 @@ export namespace Execute {
           agent,
           teamSessionID,
           output: text,
-          mutations: [], // Mutations are extracted from structured output; empty for now as agents use tag-based output
+          mutations: [],
         })
       }
 
@@ -171,6 +195,7 @@ export namespace Execute {
         complete: false,
         critiques: [],
         approved: false,
+        toolCalls: [],
       }
     }
   }
@@ -184,6 +209,66 @@ export namespace Execute {
       if (typeof r.content === "string") return r.content
     }
     return String(result)
+  }
+
+  /**
+   * Extract completed tool calls from an agent's session.
+   * Only returns "action" tools (bash, edit, write, patch, etc.)
+   * that represent actual work, not informational reads.
+   */
+  export async function extractToolCalls(sessionID: string): Promise<ToolCallInfo[]> {
+    try {
+      const msgs = await Session.messages({ sessionID })
+      const calls: ToolCallInfo[] = []
+
+      for (const msg of msgs) {
+        for (const part of msg.parts) {
+          if (part.type !== "tool") continue
+          if (part.state.status !== "completed") continue
+          if (!ACTION_TOOLS.has(part.tool)) continue
+
+          calls.push({
+            tool: part.tool,
+            title: part.state.title,
+            input: part.state.input,
+            output: part.state.output.slice(0, 500),
+          })
+        }
+      }
+
+      return calls
+    } catch (error) {
+      log.warn("failed to extract tool calls", { sessionID, error })
+      return []
+    }
+  }
+
+  /**
+   * Summarize tool calls into a human-readable string for the orchestrator.
+   */
+  export function summarizeToolCalls(calls: ToolCallInfo[]): string {
+    if (!calls.length) return ""
+
+    const files = new Set<string>()
+    const commands: string[] = []
+
+    for (const call of calls) {
+      if (call.tool === "bash") {
+        const cmd = call.input.command ?? call.input.cmd ?? ""
+        if (cmd) commands.push(typeof cmd === "string" ? cmd.slice(0, 80) : String(cmd))
+      }
+      if (call.tool === "edit" || call.tool === "write" || call.tool === "patch" || call.tool === "apply_patch") {
+        const file = call.input.filePath ?? call.input.file ?? call.input.path ?? ""
+        if (file) files.add(typeof file === "string" ? file : String(file))
+      }
+    }
+
+    const parts: string[] = []
+    if (files.size) parts.push(`Modified files: ${[...files].join(", ")}`)
+    if (commands.length) parts.push(`Commands: ${commands.join("; ")}`)
+    if (!parts.length) parts.push(`${calls.length} tool call(s)`)
+
+    return parts.join(". ")
   }
 
   export function parseOutput(text: string): AgentResult {
@@ -274,6 +359,7 @@ export namespace Execute {
       completeSummary,
       critiques,
       approved,
+      toolCalls: [],
     }
   }
 }

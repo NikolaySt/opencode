@@ -29,6 +29,7 @@ export const TeamTool = Tool.define("team", {
     const result = await Team.start({
       goal: params.goal,
       sharingStrategy: params.sharing_strategy,
+      parentSessionID: ctx.sessionID,
       abort: ctx.abort,
       onEscalate: async (question) => {
         const answers = await Question.ask({
@@ -77,6 +78,24 @@ export const TeamTool = Tool.define("team", {
         parts.push(`## Team Roster`)
         for (const agent of status.roster) {
           parts.push(`- **${agent.role}** (${agent.status}) — expertise: ${agent.expertise.join(", ")}`)
+        }
+        parts.push("")
+      }
+
+      // Show files modified by team agents
+      if (status.modifiedFiles.length) {
+        parts.push(`## Files Modified`)
+        for (const file of status.modifiedFiles) {
+          parts.push(`- ${file}`)
+        }
+        parts.push("")
+      }
+
+      // Show commands that were run
+      if (status.commandsRun.length) {
+        parts.push(`## Commands Run`)
+        for (const cmd of status.commandsRun) {
+          parts.push(`- \`${cmd.command}\` — ${cmd.title}`)
         }
         parts.push("")
       }

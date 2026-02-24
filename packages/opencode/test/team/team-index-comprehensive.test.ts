@@ -282,6 +282,56 @@ describe("team.Team.status", () => {
       },
     })
   })
+
+  test("includes modifiedFiles from workspace artifacts", async () => {
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const teamID = createTeamSessionDirect(Instance.project.id)
+        Workspace.create(teamID, "Test")
+
+        Workspace.set(teamID, "artifacts", { modified_files: ["src/auth.ts", "src/utils.ts"] }, "developer")
+
+        const status = Team.status(teamID)
+        expect(status!.modifiedFiles).toEqual(["src/auth.ts", "src/utils.ts"])
+      },
+    })
+  })
+
+  test("includes commandsRun from workspace artifacts", async () => {
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const teamID = createTeamSessionDirect(Instance.project.id)
+        Workspace.create(teamID, "Test")
+
+        Workspace.set(
+          teamID,
+          "artifacts",
+          { commands_run: [{ command: "bun test", output: "pass", title: "Run tests" }] },
+          "qa",
+        )
+
+        const status = Team.status(teamID)
+        expect(status!.commandsRun).toHaveLength(1)
+        expect(status!.commandsRun[0].command).toBe("bun test")
+      },
+    })
+  })
+
+  test("returns empty arrays when no tool activity", async () => {
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const teamID = createTeamSessionDirect(Instance.project.id)
+        Workspace.create(teamID, "Test")
+
+        const status = Team.status(teamID)
+        expect(status!.modifiedFiles).toEqual([])
+        expect(status!.commandsRun).toEqual([])
+      },
+    })
+  })
 })
 
 describe("team.Team.Event", () => {
@@ -351,6 +401,75 @@ describe("team.Team.Event", () => {
 
         unsub()
         expect(received).toBe(true)
+      },
+    })
+  })
+
+  test("Updated event fires during Team.cancel()", async () => {
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const teamID = createTeamSessionDirect(Instance.project.id)
+
+        let received = false
+        const unsub = Bus.subscribe(Team.Event.Updated, (event) => {
+          if (event.properties.info.id === teamID) {
+            received = true
+            expect(event.properties.info.status).toBe("cancelled")
+          }
+        })
+
+        Team.cancel(teamID)
+        await new Promise((r) => setTimeout(r, 50))
+
+        unsub()
+        expect(received).toBe(true)
+      },
+    })
+  })
+})
+
+describe("team.Team.create with hierarchical strategy", () => {
+  test("persists hierarchical sharing strategy", async () => {
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const info = await Team.create({ goal: "Test", sharingStrategy: "hierarchical" })
+        expect(info.sharingStrategy).toBe("hierarchical")
+        const fetched = Team.get(info.id)
+        expect(fetched!.sharingStrategy).toBe("hierarchical")
+      },
+    })
+  })
+})
+
+describe("team.Team.status edge cases", () => {
+  test("returns empty arrays when artifacts has other keys but no modified_files/commands_run", async () => {
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const teamID = createTeamSessionDirect(Instance.project.id)
+        Workspace.create(teamID, "Test")
+
+        Workspace.set(teamID, "artifacts", { some_other_key: "value" }, "system")
+
+        const status = Team.status(teamID)
+        expect(status!.modifiedFiles).toEqual([])
+        expect(status!.commandsRun).toEqual([])
+      },
+    })
+  })
+
+  test("fromRow maps time.created and time.updated correctly", async () => {
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const info = await Team.create({ goal: "Time test" })
+        const fetched = Team.get(info.id)
+
+        expect(fetched!.time.created).toBe(info.time.created)
+        expect(fetched!.time.updated).toBe(info.time.updated)
+        expect(fetched!.time.created).toBeGreaterThan(0)
       },
     })
   })

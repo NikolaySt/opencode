@@ -763,3 +763,45 @@ describe("team.workspace schemas", () => {
     expect(Workspace.SECTIONS).toHaveLength(8)
   })
 })
+
+describe("team.workspace edge cases", () => {
+  test("remove passes updatedBy to set", async () => {
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const teamID = createTeamSession(Instance.project.id)
+        Workspace.create(teamID, "Test")
+
+        Workspace.addQuestion(teamID, { question: "Q1", asked_by: "dev", status: "open" })
+        const questions = Workspace.get(teamID, "questions") as any[]
+        expect(questions).toHaveLength(1)
+
+        let eventUpdatedBy: string | undefined
+        const unsub = Bus.subscribe(Workspace.Event.Updated, (event) => {
+          if (event.properties.section === "questions") {
+            eventUpdatedBy = event.properties.updatedBy
+          }
+        })
+
+        Workspace.remove(teamID, "questions", "question", "Q1", "cleanup-agent")
+        await new Promise((r) => setTimeout(r, 50))
+
+        unsub()
+        expect(eventUpdatedBy).toBe("cleanup-agent")
+        const after = Workspace.get(teamID, "questions") as any[]
+        expect(after).toHaveLength(0)
+      },
+    })
+  })
+
+  test("summary does not throw for non-existent workspace", async () => {
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const result = Workspace.summary("team_nonexistent_1234")
+        expect(typeof result).toBe("string")
+        expect(result).toContain("## Goal")
+      },
+    })
+  })
+})

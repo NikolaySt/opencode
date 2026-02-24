@@ -1,6 +1,6 @@
 ---
 title: Teams
-description: Multi-agent collaboration for complex tasks.
+description: Run multiple AI specialists on a single goal.
 ---
 
 Teams let multiple AI specialists collaborate on a single goal. An orchestrator staffs a team, assigns work, triggers peer reviews, and converges on a result — all autonomously.
@@ -13,6 +13,40 @@ Teams run alongside the regular single-agent mode. Your existing sessions and wo
 
 ---
 
+## Watch progress
+
+Team sessions integrate with the TUI sidebar and session navigation.
+
+---
+
+### Track TODOs
+
+The orchestrator writes live progress to the TODO sidebar on your parent session. Phase progress appears as high-priority items, and agent tasks appear as medium-priority items.
+
+As phases complete and agents finish their work, items update in real time.
+
+```txt frame="none"
+ Todo
+  ✓ Phase: understanding
+  ● Phase: design
+  ○ Phase: implementation
+  ○ Phase: verification
+  ✓ [architect] Design system architecture
+  ● [developer] Build REST API endpoints
+```
+
+---
+
+### Navigate child sessions
+
+Every agent runs in its own child session, linked to your calling session via `parentID`. The orchestrator session is also a child, so you can inspect its full conversation history.
+
+- Use `session_child_cycle` to cycle through active agent sessions
+- Use the back arrow to return to the parent session
+- Child sessions stay out of the main session list sidebar
+
+---
+
 ## Start a session
 
 Run the `/team` command with a description of what you want done.
@@ -21,7 +55,7 @@ Run the `/team` command with a description of what you want done.
 /team Build a REST API for user management with auth, rate limiting, and tests
 ```
 
-The orchestrator takes over. It staffs the right specialists, decomposes the work, and drives the team through to completion. If the team gets stuck on something it can't resolve, it prompts you for input.
+The orchestrator takes over. It staffs the right specialists, decomposes the work, and drives the team through to completion.
 
 ---
 
@@ -33,8 +67,9 @@ Here's what happens when you type `/team`:
 2. The LLM calls the `team` tool with your goal.
 3. The tool calls `Team.start()`, which creates a session, an orchestrator, and a workspace.
 4. The orchestrator runs in a loop — staffing agents, assigning tasks, triggering reviews, and advancing phases.
-5. If the team needs your input, the tool uses the question system to prompt you in the TUI.
-6. When complete, the tool formats the results and the LLM summarizes them for you.
+5. Each agent runs through `SessionPrompt.prompt()` with full tool access (bash, edit, write, etc.). After each turn, tool calls are extracted and recorded in the workspace.
+6. If the team needs your input, the tool uses the question system to prompt you in the TUI.
+7. When complete, the tool formats the results — including files modified and commands run — and the LLM summarizes them for you.
 
 ---
 
@@ -52,6 +87,8 @@ A team session has five layers.
 
 The orchestrator is the only agent that sees the full picture. Individual specialists see a filtered view based on the [sharing strategy](#choose-a-sharing-strategy).
 
+Each agent runs through the standard `SessionPrompt.prompt()` pipeline with full tool access. After an agent finishes, the execution bridge extracts tool call results (file edits, bash outputs) and surfaces them to the orchestrator as workspace artifacts and status messages.
+
 ---
 
 ### Review the data model
@@ -66,7 +103,7 @@ Everything is persisted in SQLite across 5 tables with cascade deletes.
 | `team_message`   | Communication graph                | `from_role`, `to_role`, `type`, `content`, `ref_ids` (JSON)  |
 | `review_thread`  | Review lifecycle tracking          | `author_role`, `reviewer_role`, `status`, `round`            |
 
-Each table has a foreign key to `team_session` with `ON DELETE CASCADE`. Compound indexes cover the common query patterns. The migration runs automatically on startup.
+Each table has a foreign key to `team_session` with `ON DELETE CASCADE`. Compound indexes cover the common query patterns.
 
 ---
 
@@ -104,7 +141,7 @@ src/command/template/
 
 ## Understand the lifecycle
 
-Every team session flows through statuses and phases.
+Every session flows through statuses and phases.
 
 ---
 
@@ -112,12 +149,12 @@ Every team session flows through statuses and phases.
 
 | Status         | Meaning                                  |
 | -------------- | ---------------------------------------- |
-| `active`       | Team is working                          |
+| `active`       | Working                                  |
 | `waiting_user` | Orchestrator escalated a question to you |
 | `complete`     | All work is done                         |
 | `cancelled`    | Session was cancelled                    |
 
-When the orchestrator uses the `escalate` action, the session flips to `waiting_user`. After you answer, the session returns to `active`.
+When the orchestrator uses the `escalate` action, the session flips to `waiting_user`. After you answer, it returns to `active`.
 
 ---
 
@@ -153,7 +190,7 @@ Nine built-in role templates are available. The orchestrator picks the right one
 | **UX reviewer**            | Usability, accessibility, WCAG compliance        | Yes         |
 | **Documentation writer**   | Technical writing, API docs, user guides         | Yes         |
 
-Each template defines a system prompt, workspace read/write permissions, and expertise tags. Every spawned agent gets its own OpenCode session linked to the `session` table.
+Each template defines a system prompt, workspace read/write permissions, and expertise tags. Every spawned agent gets its own OpenCode session as a child of the calling session.
 
 ---
 
@@ -161,13 +198,13 @@ Each template defines a system prompt, workspace read/write permissions, and exp
 
 Roles with signals are auto-suggested through implicit signal detection. When an agent's output mentions terms like "security", "vulnerability", or "injection", the system suggests spawning a security reviewer.
 
-A role needs at least 2 signal hits to be suggested. The system surfaces up to 2 matches at a time. Roles without signals — architect and developer — are never auto-suggested. The orchestrator must explicitly staff them.
+A role needs at least 2 signal hits to be suggested. Roles without signals — architect and developer — are never auto-suggested and must be explicitly staffed.
 
 ---
 
 ### Register custom roles
 
-You can register your own role templates programmatically.
+Register your own role templates programmatically.
 
 ```ts title="custom-role.ts"
 import { Roles } from "./team/roles"
@@ -183,7 +220,7 @@ Roles.register({
 })
 ```
 
-The `workspaceRead` and `workspaceWrite` arrays control which workspace sections the agent can access. The `signals` array drives auto-suggestion.
+The `workspaceRead` and `workspaceWrite` arrays control which workspace sections the agent can access. The `signals` array drives auto-suggestion. Registered roles appear in `Roles.list()` and are matchable via `Roles.match()`.
 
 ---
 
@@ -219,7 +256,7 @@ The orchestrator follows sizing heuristics from its system prompt.
 - **Performance-critical**: add Performance Specialist
 - **Database changes**: add Database Specialist
 
-The orchestrator starts minimal and spawns more agents as needed.
+It starts minimal and spawns more agents as needed.
 
 ---
 
@@ -263,9 +300,17 @@ Tags are case-insensitive. Each tag's content extends to the next tag or end of 
 
 ---
 
+### Know the tool extraction
+
+In addition to text tags, agents make real file changes and run commands through tools. Tool calls are automatically extracted after each agent turn and recorded in the workspace `artifacts` section as `modified_files` and `commands_run`.
+
+The orchestrator sees a summary of tool activity in its context. File-modifying tools (`edit`, `write`, `patch`, `apply_patch`) have their file paths extracted. Bash commands are captured with their output. The `multiedit` tool is tracked as a generic tool call.
+
+---
+
 ## Use the workspace
 
-The workspace is shared state organized into 8 sections, initialized when a team session is created.
+The workspace is shared state organized into 8 sections, initialized when a session is created.
 
 | Section        | Type   | Initial value       | Content                         |
 | -------------- | ------ | ------------------- | ------------------------------- |
@@ -298,7 +343,7 @@ Decisions have a structured format with rationale and alternatives.
 }
 ```
 
-Decisions can have a status of `proposed`, `approved`, or `rejected`. The orchestrator records decisions via the `decide` action. Review approvals also create decision entries.
+Decisions can have a status of `proposed`, `approved`, or `rejected`. The orchestrator records decisions via the `decide` action.
 
 ---
 
@@ -331,12 +376,12 @@ Sharing strategies control what each agent sees and how their outputs propagate 
 Each agent sees:
 
 - The full workspace **summary** (a rendered text overview)
-- **Detailed content** for sections they have read access to
+- **Detailed content** for sections they have read access to (empty sections are excluded)
 - **Messages** addressed to them, from them, or broadcast (up to 10)
 - **Active reviews** they're involved in
-- **All team decisions**
+- **All decisions**
 
-On propagation, the agent's collaborators and reviewers are notified. Write permissions are enforced — agents can only update sections listed in their `workspaceWrite`.
+On propagation, collaborators and reviewers are notified. Write permissions are enforced — agents can only update sections listed in their `workspaceWrite`. Only `set` and `append` operations are applied; other operations pass through without modifying data.
 
 ---
 
@@ -350,20 +395,18 @@ Each agent sees:
 
 No messages or reviews are injected. The orchestrator curates all information flow. On propagation, only the orchestrator is notified.
 
-This is the most restrictive strategy. Use it for sensitive tasks where you want tight information control.
-
 ---
 
 ### Use broadcast
 
 Every agent sees:
 
-- The **full workspace** — all 8 sections in detail
+- The **full workspace** — all 8 sections in detail (empty sections excluded)
 - **All recent messages** (up to 20)
 - **All active reviews**
 - The **full roster** with status and expertise
 
-On propagation, all agents except the author are notified. Write permission checks are skipped. Maximum visibility, highest token cost.
+On propagation, all agents except the author are notified. Write permission checks are skipped.
 
 ---
 
@@ -394,7 +437,7 @@ The review protocol ensures quality through structured critique-revision loops.
 | `needs_revision` | Critique recorded, waiting for author revision |
 | `escalated`      | 3 rounds without convergence, needs mediation  |
 
-The orchestrator can mediate escalated reviews using the `mediate` action, which records a decision and force-approves the thread.
+The orchestrator can mediate escalated reviews using the `mediate` action. Operations on non-existent reviews are safe no-ops — they return `undefined` and don't emit events.
 
 ---
 
@@ -415,7 +458,9 @@ Retired agents are excluded from active lookups but remain in the database. The 
 
 ### Understand retirement
 
-The `shouldRetire` function checks whether an idle agent can be safely removed. An agent won't be retired if it's `working`, already `retired`, or involved in an active review as either author or reviewer.
+The `shouldRetire` function checks whether an agent can be safely removed. An agent won't be retired if it's `working`, already `retired`, or involved in an active review as either author or reviewer.
+
+A `waiting` or `idle` agent with no active reviews will be flagged for retirement.
 
 ---
 
@@ -463,7 +508,7 @@ Teams emit 14 events through the bus system. Subscribe to these in plugins.
 
 ## Know the prompts
 
-The team module includes 12 prompt templates in `src/team/prompt/`.
+The module includes 12 prompt templates in `src/team/prompt/`.
 
 | File                         | Used by                 | Purpose                                        |
 | ---------------------------- | ----------------------- | ---------------------------------------------- |
@@ -480,13 +525,11 @@ The team module includes 12 prompt templates in `src/team/prompt/`.
 | `reviewer-instructions.txt`  | Review loop (reviewer)  | How to critique artifacts                      |
 | `revision-instructions.txt`  | Review loop (author)    | How to address critique feedback               |
 
-The orchestrator prompt defines the action format, team composition guidelines, intervention triggers, and phase progression rules.
-
 ---
 
 ## Use the API
 
-The team feature is primarily accessed via the `/team` command. For programmatic use, the `Team` namespace and `team` tool are also available.
+The feature is primarily accessed via the `/team` command. For programmatic use, the `Team` namespace and `team` tool are also available.
 
 ---
 
@@ -499,7 +542,7 @@ The `team` tool is registered in the tool registry and callable by any LLM agent
 | `goal`             | string | Yes      | —             | The task for the team                       |
 | `sharing_strategy` | enum   | No       | `"selective"` | `selective`, `hierarchical`, or `broadcast` |
 
-When the team needs user input, the tool uses the question system to prompt you in the TUI. The tool returns a formatted summary with the final phase, team roster, and recent activity.
+When the team needs user input, the tool uses the question system to prompt you in the TUI. The tool returns a formatted summary with the final phase, roster, files modified, commands run, and recent activity.
 
 ---
 
@@ -511,7 +554,8 @@ When the team needs user input, the tool uses the question system to prompt you 
 const result = await Team.start({
   goal: "Build a REST API with auth",
   sharingStrategy: "selective",
-  onEscalate: async (question) => {
+  parentSessionID: ctx.sessionID,
+  onEscalate: async (question: string) => {
     return "Use JWT with httpOnly cookies"
   },
   onStatus: (message) => console.log(message),
@@ -522,13 +566,15 @@ const result = await Team.start({
 // result.summary — completion summary string
 ```
 
+The `parentSessionID` threads through to all spawned agent sessions, making them children of the calling session. This enables TUI navigation between agent sessions and keeps them out of the main session list.
+
 The `onEscalate` callback fires when the orchestrator uses the `escalate` action. The session status flips to `waiting_user` until you return an answer.
 
 ---
 
 ### Inspect a session
 
-`Team.status()` returns the current state of a team session.
+`Team.status()` returns the current state of a session.
 
 ```ts
 const status = Team.status(teamSessionID)
@@ -537,13 +583,17 @@ const status = Team.status(teamSessionID)
 // status.recentActivity — last 10 messages (type, from, to, content)
 // status.openQuestions — unanswered questions
 // status.workspaceSummary — rendered workspace text
+// status.modifiedFiles — files changed by agents
+// status.commandsRun — bash commands executed by agents
 ```
+
+Returns `undefined` for non-existent sessions. When `artifacts` exist but contain no `modified_files` or `commands_run`, empty arrays are returned.
 
 ---
 
 ### Cancel a session
 
-`Team.cancel()` retires all agents and sets the session status to `cancelled`.
+`Team.cancel()` retires all agents, sets the status to `cancelled`, and emits a `team.updated` event.
 
 ```ts
 Team.cancel(teamSessionID)
@@ -553,31 +603,31 @@ Team.cancel(teamSessionID)
 
 ## Try it out
 
-To test the team feature end-to-end, restart the OpenCode server and TUI to pick up the new tool registration, migration, and command template.
+Restart the OpenCode server and TUI to pick up the new tool registration, migration, and command template.
 
 ```txt frame="none"
 /team Build a simple utility function that validates email addresses with tests
 ```
 
 :::caution
-The team session may take several minutes depending on task complexity and model speed. Each agent runs its own LLM calls sequentially through the orchestrator loop.
+The session may take several minutes depending on task complexity and model speed. Each agent runs its own LLM calls sequentially through the orchestrator loop.
 :::
 
 Watch for these steps in the output:
 
 1. **Tool call** — the LLM calls the `team` tool with your goal
 2. **Staffing** — the orchestrator spawns agents (likely Architect + Developer + QA)
-3. **Phase progression** — the session moves through understanding → design → implementation → verification → complete
-4. **Review cycles** — you may see critique → revision exchanges between agents
+3. **Phase progression** — understanding → design → implementation → verification → complete
+4. **Review cycles** — critique → revision exchanges between agents
 5. **Completion** — a summary with the roster and recent activity
 
-If the team needs your input, you'll see a question prompt in the TUI. Answer it and the team continues.
+If the team needs your input, you'll see a question prompt in the TUI.
 
 ---
 
 ## Run the tests
 
-The team module has 355 tests across 13 files.
+The module has 419 tests across 13 files.
 
 ```bash frame="none"
 bun test test/team/
@@ -591,21 +641,21 @@ Run from the `packages/opencode` directory. Tests cannot be run from the repo ro
 
 ### Know what's covered
 
-| Test file                    | Area               | What it tests                                                                |
-| ---------------------------- | ------------------ | ---------------------------------------------------------------------------- |
-| `team-db.test.ts`            | Database           | End-to-end CRUD for workspace, messages, and reviews against real SQLite     |
-| `schema-comprehensive`       | Schema             | All 5 tables: insert, read back, enum values, FK cascades, JSON columns      |
-| `workspace-comprehensive`    | Workspace          | Create, get/set/append/remove, decisions, questions, answers, summary        |
-| `roster-comprehensive`       | Agent lifecycle    | Spawn, retire, setStatus, incrementSteps/Tokens, shouldRetire, filtering     |
-| `message-comprehensive`      | Messages           | Send, recent, forRole, byType, Bus event emission, all 10 types              |
-| `review-comprehensive`       | Reviews            | Create, approve, escalate, incrementRound, critique/revision, history        |
-| `review-loop-comprehensive`  | Review loop        | extractRevised with `[ARTIFACT]` tags, fallback, `## Revision Summary`       |
-| `roles-comprehensive`        | Roles              | All 9 templates, get/list/register, signal matching, scoring                 |
-| `execute-comprehensive`      | Execution          | parseOutput for all 8 tags, buildContext, buildMessage, extractAssistantText |
-| `orchestrator-comprehensive` | Orchestrator       | parseAction for all 11 types, extractText, forceAdvance, phase validation    |
-| `sharing-comprehensive`      | Sharing strategies | All 3 strategies: buildContext, propagate, summarize, resolve                |
-| `hooks-comprehensive`        | Events             | All 14 events mapped to correct BusEvent definitions                         |
-| `team-index-comprehensive`   | Team namespace     | create, get, cancel, status, schemas, Event.Created fires via Bus            |
+| Test file                    | Area               | What it tests                                                                                                                 |
+| ---------------------------- | ------------------ | ----------------------------------------------------------------------------------------------------------------------------- |
+| `team-db`                    | Database           | End-to-end CRUD for workspace, messages, and reviews against real SQLite                                                      |
+| `schema-comprehensive`       | Schema             | All 5 tables: insert, read back, enum values, FK cascades, JSON columns                                                       |
+| `workspace-comprehensive`    | Workspace          | Create, get/set/append/remove (updatedBy), decisions, questions, answers, summary (nonexistent)                               |
+| `roster-comprehensive`       | Agent lifecycle    | Spawn (parentSessionID + bus event), retire, setStatus, incrementSteps/Tokens, shouldRetire (all statuses), filtering         |
+| `message-comprehensive`      | Messages           | Send, recent, forRole (default limit), byType, bus event emission, all 10 types                                               |
+| `review-comprehensive`       | Reviews            | Create, approve, escalate (incl. nonexistent), incrementRound, critique/revision, history, event non-emission                 |
+| `review-loop-comprehensive`  | Review loop        | extractRevised with `[ARTIFACT]` tags, fallback, `## Revision Summary`                                                        |
+| `roles-comprehensive`        | Roles              | All 9 templates, get/list/register (visibility in list + match), signal matching, scoring                                     |
+| `execute-comprehensive`      | Execution          | parseOutput (all 8 tags + edge cases), buildContext, buildMessage, extractAssistantText, summarizeToolCalls, extractToolCalls |
+| `orchestrator-comprehensive` | Orchestrator       | parseAction (all 11 types + edge cases), extractText, forceAdvance, phase validation, TODO sync patterns                      |
+| `sharing-comprehensive`      | Sharing strategies | All 3 strategies: buildContext, propagate (incl. unsupported ops), summarize, resolve, empty section filtering                |
+| `hooks-comprehensive`        | Events             | All 14 events mapped to correct BusEvent definitions                                                                          |
+| `team-index-comprehensive`   | Team namespace     | create (all strategies), get, cancel (+ Updated event), status (modifiedFiles/commandsRun/edge cases), schemas, events        |
 
 ---
 
@@ -617,9 +667,8 @@ Functions that call `SessionPrompt.prompt()` need a real LLM provider and can't 
 - `Orchestrator.run()` — the main orchestrator loop
 - `ReviewLoop.run()` — the critique-revision cycle
 - `Team.start()` — creates a session and runs the orchestrator
-- `Roster.spawn()` — creates a `Session` (requires project context)
 
-This follows the project's testing philosophy: avoid mocks, test real implementations. These functions need integration tests with a configured provider.
+`Roster.spawn()` is fully tested — it creates real sessions via `Session.create()` and verifies parent-child relationships, session titles, and bus event emission.
 
 ---
 

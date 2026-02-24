@@ -434,3 +434,21 @@ describe("team.message with mutations", () => {
     })
   })
 })
+
+describe("team.message.forRole default limit", () => {
+  test("returns at most 20 messages by default", async () => {
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const teamID = createTeamSession(Instance.project.id)
+
+        for (let i = 0; i < 25; i++) {
+          TeamMessage.send({ teamSessionID: teamID, fromRole: "dev", type: "status", content: `msg ${i}` })
+        }
+
+        const msgs = TeamMessage.forRole(teamID, "dev")
+        expect(msgs).toHaveLength(20)
+      },
+    })
+  })
+})
