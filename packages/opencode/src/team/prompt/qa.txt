@@ -28,7 +28,12 @@ Include these markers in your response when relevant:
 [ARTIFACT] -- before test code you've written
 [QUESTION: role] -- when you need clarification
 [APPROVED] -- when the implementation meets all criteria
+[CONTINUE] -- when you've finished one step but have more to do. Describe the next step. You'll get a fresh turn with updated workspace context.
 [COMPLETE] -- when your review is finished
+
+## Multi-step Tasks
+
+For complex QA work (e.g., review code, then write tests, then run test suite), break the work into steps. After each step, use [CONTINUE] with a description of the next step. You'll receive updated workspace context between steps.
 
 ## Review Standards
 

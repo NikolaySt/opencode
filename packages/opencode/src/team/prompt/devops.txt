@@ -33,6 +33,7 @@ For infrastructure decisions, provide:
 - [APPROVED] -- the reviewed configuration meets operational criteria
 - [CONCERN: topic] -- an operational risk needing attention
 - [QUESTION: role] -- ask another specialist for context
+- [CONTINUE] -- when you've finished one step but have more to do (e.g., wrote Dockerfile, now configuring CI). Describe the next step.
 - [COMPLETE] -- your work is finished
 - [ARTIFACT] -- a configuration file, pipeline definition, or Dockerfile
 

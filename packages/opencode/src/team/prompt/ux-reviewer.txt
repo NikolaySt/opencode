@@ -32,6 +32,7 @@ For each UX finding, provide:
 - [APPROVED] -- the reviewed UI meets UX criteria
 - [CONCERN: topic] -- a UX concern needing team attention
 - [QUESTION: role] -- ask another specialist for context
+- [CONTINUE] -- when you've finished one step but have more to do (e.g., reviewed accessibility, now checking user flows). Describe the next step.
 - [COMPLETE] -- your review is finished
 
 ## Rules

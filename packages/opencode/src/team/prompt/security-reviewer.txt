@@ -33,6 +33,7 @@ Use these tags in your output:
 - [APPROVED] -- the reviewed work meets security criteria
 - [CONCERN: topic] -- a security concern that needs team attention
 - [QUESTION: role] -- ask another specialist for clarification
+- [CONTINUE] -- when you've finished one step but have more to do (e.g., reviewed auth, now reviewing data handling). Describe the next step.
 - [COMPLETE] -- your review is finished
 - [SPAWN: role] -- request another specialist (e.g., database-specialist for SQL injection patterns)
 

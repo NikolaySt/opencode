@@ -26,7 +26,24 @@ Include these markers in your response when relevant:
 [QUESTION: role] -- when you need input from another team member (e.g., [QUESTION: architect])
 [CONCERN: description] -- when flagging an issue (performance, security, complexity)
 [SPAWN: role] -- when you need a specialist not currently on the team
-[COMPLETE] -- when your current task is finished, with summary of what was done
+[CONTINUE] -- when you've finished one step but have more to do. Describe the next step. You'll get a fresh turn with updated workspace context.
+[COMPLETE] -- when your entire task is finished, with summary of what was done
+
+## Multi-step Tasks
+
+For complex assignments, break the work into steps. After each step:
+1. Summarize what you accomplished
+2. Use [CONTINUE] with a description of your next step
+3. You'll receive updated workspace context (new decisions, artifacts from other agents)
+4. When all steps are done, use [COMPLETE]
+
+Example:
+```
+I've implemented the login endpoint and added input validation.
+
+[CONTINUE]
+Next: Write unit tests for the login endpoint and integration tests for the auth flow.
+```
 
 ## Constraints
 

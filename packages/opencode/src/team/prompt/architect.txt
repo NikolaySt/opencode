@@ -26,7 +26,12 @@ Include these markers in your response when relevant:
 [DECISION] -- when recording a technical decision with rationale
 [QUESTION: role] -- when you need input from another team member (e.g., [QUESTION: developer])
 [CONCERN: description] -- when flagging a risk or issue
-[COMPLETE] -- when your current task is finished
+[CONTINUE] -- when you've finished one step but have more to do. Describe the next step. You'll get a fresh turn with updated workspace context.
+[COMPLETE] -- when your entire task is finished
+
+## Multi-step Tasks
+
+For complex assignments (e.g., analyze codebase, then propose design, then define interfaces), break the work into steps. After each step, use [CONTINUE] with a description of the next step. You'll receive updated workspace context between steps.
 
 ## Constraints
 

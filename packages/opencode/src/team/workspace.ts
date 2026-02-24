@@ -107,7 +107,7 @@ export namespace Workspace {
   }
 
   export function set(teamSessionID: string, section: Section, content: unknown, updatedBy?: string) {
-    Database.use((db) => {
+    Database.transaction((db) => {
       const row = db
         .select()
         .from(WorkspaceTable)
@@ -128,9 +128,26 @@ export namespace Workspace {
   }
 
   export function append(teamSessionID: string, section: Section, item: unknown, updatedBy?: string) {
-    const current = get(teamSessionID, section)
-    if (!Array.isArray(current)) return
-    set(teamSessionID, section, [...current, item], updatedBy)
+    Database.transaction((db) => {
+      const row = db
+        .select()
+        .from(WorkspaceTable)
+        .where(and(eq(WorkspaceTable.team_session_id, teamSessionID), eq(WorkspaceTable.section, section)))
+        .get()
+      if (!row) return
+      const current = row.content
+      if (!Array.isArray(current)) return
+      db.update(WorkspaceTable)
+        .set({
+          content: [...current, item],
+          last_updated_by: updatedBy,
+          version: row.version + 1,
+          time_updated: Date.now(),
+        })
+        .where(eq(WorkspaceTable.id, row.id))
+        .run()
+      Database.effect(() => Bus.publish(Event.Updated, { teamSessionID, section, updatedBy }))
+    })
   }
 
   /** Remove an item from an array section by matching a key field */
@@ -141,12 +158,28 @@ export namespace Workspace {
     matchValue: unknown,
     updatedBy?: string,
   ) {
-    const current = get(teamSessionID, section)
-    if (!Array.isArray(current)) return
-    const filtered = current.filter((item: Record<string, unknown>) => item[matchKey] !== matchValue)
-    if (filtered.length !== current.length) {
-      set(teamSessionID, section, filtered, updatedBy)
-    }
+    Database.transaction((db) => {
+      const row = db
+        .select()
+        .from(WorkspaceTable)
+        .where(and(eq(WorkspaceTable.team_session_id, teamSessionID), eq(WorkspaceTable.section, section)))
+        .get()
+      if (!row) return
+      const current = row.content
+      if (!Array.isArray(current)) return
+      const filtered = current.filter((item: Record<string, unknown>) => item[matchKey] !== matchValue)
+      if (filtered.length === current.length) return
+      db.update(WorkspaceTable)
+        .set({
+          content: filtered,
+          last_updated_by: updatedBy,
+          version: row.version + 1,
+          time_updated: Date.now(),
+        })
+        .where(eq(WorkspaceTable.id, row.id))
+        .run()
+      Database.effect(() => Bus.publish(Event.Updated, { teamSessionID, section, updatedBy }))
+    })
   }
 
   export function addDecision(teamSessionID: string, decision: Omit<Decision, "id" | "timestamp">) {
@@ -169,12 +202,60 @@ export namespace Workspace {
   }
 
   export function answerQuestion(teamSessionID: string, questionID: string, answer: string, answeredBy: string) {
-    const questions = get(teamSessionID, "questions") as Question[]
-    if (!questions) return
-    const updated = questions.map((q) =>
-      q.id === questionID ? { ...q, answer, answered_by: answeredBy, status: "answered" as const } : q,
-    )
-    set(teamSessionID, "questions", updated, answeredBy)
+    Database.transaction((db) => {
+      const row = db
+        .select()
+        .from(WorkspaceTable)
+        .where(and(eq(WorkspaceTable.team_session_id, teamSessionID), eq(WorkspaceTable.section, "questions")))
+        .get()
+      if (!row) return
+      const questions = row.content as Question[]
+      if (!questions) return
+      const updated = questions.map((q) =>
+        q.id === questionID ? { ...q, answer, answered_by: answeredBy, status: "answered" as const } : q,
+      )
+      db.update(WorkspaceTable)
+        .set({
+          content: updated,
+          last_updated_by: answeredBy,
+          version: row.version + 1,
+          time_updated: Date.now(),
+        })
+        .where(eq(WorkspaceTable.id, row.id))
+        .run()
+      Database.effect(() => Bus.publish(Event.Updated, { teamSessionID, section: "questions", updatedBy: answeredBy }))
+    })
+  }
+
+  /**
+   * Atomically read a JSON object section, apply a merge function, and write back.
+   * Prevents lost updates when multiple agents modify the same section concurrently.
+   */
+  export function merge(
+    teamSessionID: string,
+    section: Section,
+    fn: (current: unknown) => unknown,
+    updatedBy?: string,
+  ) {
+    Database.transaction((db) => {
+      const row = db
+        .select()
+        .from(WorkspaceTable)
+        .where(and(eq(WorkspaceTable.team_session_id, teamSessionID), eq(WorkspaceTable.section, section)))
+        .get()
+      if (!row) return
+      const merged = fn(row.content)
+      db.update(WorkspaceTable)
+        .set({
+          content: merged,
+          last_updated_by: updatedBy,
+          version: row.version + 1,
+          time_updated: Date.now(),
+        })
+        .where(eq(WorkspaceTable.id, row.id))
+        .run()
+      Database.effect(() => Bus.publish(Event.Updated, { teamSessionID, section, updatedBy }))
+    })
   }
 
   export function openQuestions(teamSessionID: string): Question[] {

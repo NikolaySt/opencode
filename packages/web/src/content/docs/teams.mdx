@@ -13,40 +13,6 @@ Teams run alongside the regular single-agent mode. Your existing sessions and wo
 
 ---
 
-## Watch progress
-
-Team sessions integrate with the TUI sidebar and session navigation.
-
----
-
-### Track TODOs
-
-The orchestrator writes live progress to the TODO sidebar on your parent session. Phase progress appears as high-priority items, and agent tasks appear as medium-priority items.
-
-As phases complete and agents finish their work, items update in real time.
-
-```txt frame="none"
- Todo
-  ✓ Phase: understanding
-  ● Phase: design
-  ○ Phase: implementation
-  ○ Phase: verification
-  ✓ [architect] Design system architecture
-  ● [developer] Build REST API endpoints
-```
-
----
-
-### Navigate child sessions
-
-Every agent runs in its own child session, linked to your calling session via `parentID`. The orchestrator session is also a child, so you can inspect its full conversation history.
-
-- Use `session_child_cycle` to cycle through active agent sessions
-- Use the back arrow to return to the parent session
-- Child sessions stay out of the main session list sidebar
-
----
-
 ## Start a session
 
 Run the `/team` command with a description of what you want done.
@@ -67,9 +33,45 @@ Here's what happens when you type `/team`:
 2. The LLM calls the `team` tool with your goal.
 3. The tool calls `Team.start()`, which creates a session, an orchestrator, and a workspace.
 4. The orchestrator runs in a loop — staffing agents, assigning tasks, triggering reviews, and advancing phases.
-5. Each agent runs through `SessionPrompt.prompt()` with full tool access (bash, edit, write, etc.). After each turn, tool calls are extracted and recorded in the workspace.
+5. Each agent runs through `Execute.runMultiStep()` with full tool access (bash, edit, write, etc.). Agents can break complex assignments into multiple steps using `[CONTINUE]`, getting refreshed workspace context between steps. When the orchestrator staffs a team or uses `parallel_assign`, multiple agents run concurrently via `Promise.allSettled`.
 6. If the team needs your input, the tool uses the question system to prompt you in the TUI.
 7. When complete, the tool formats the results — including files modified and commands run — and the LLM summarizes them for you.
+
+---
+
+## Watch progress
+
+Team sessions integrate with the TUI sidebar and session navigation.
+
+---
+
+### Track TODOs
+
+The orchestrator writes live progress to the TODO sidebar on your parent session. Phase progress appears as high-priority items, agent tasks as medium-priority items, and individual sub-steps as low-priority items.
+
+As phases complete and agents finish their work, items update in real time.
+
+```txt frame="none"
+ Todo
+  ✓ Phase: understanding
+  ● Phase: design
+  ○ Phase: implementation
+  ○ Phase: verification
+  ✓ [architect] Design system architecture
+  ● [developer] Build REST API endpoints
+    ✓ Implement login endpoint
+    ● Write unit tests for auth flow
+```
+
+---
+
+### Navigate child sessions
+
+Every agent runs in its own child session, linked to your calling session via `parentID`. The orchestrator session is also a child, so you can inspect its full conversation history.
+
+- Use `session_child_cycle` to cycle through active agent sessions
+- Use the back arrow to return to the parent session
+- Child sessions stay out of the main session list sidebar
 
 ---
 
@@ -77,13 +79,13 @@ Here's what happens when you type `/team`:
 
 A team session has five layers.
 
-| Layer            | What it does                                                    |
-| ---------------- | --------------------------------------------------------------- |
-| **Orchestrator** | Drives the loop — staffs agents, assigns tasks, advances phases |
-| **Roster**       | Agent lifecycle — spawn, retire, track status and metrics       |
-| **Workspace**    | Shared state — goal, plan, decisions, artifacts, questions      |
-| **Messages**     | Typed communication graph between agents                        |
-| **Reviews**      | Critique → revision loops with auto-escalation                  |
+| Layer            | What it does                                                                            |
+| ---------------- | --------------------------------------------------------------------------------------- |
+| **Orchestrator** | Drives the loop — staffs agents, assigns tasks (in parallel or series), advances phases |
+| **Roster**       | Agent lifecycle — spawn, retire, track status and metrics                               |
+| **Workspace**    | Shared state — goal, plan, decisions, artifacts, questions                              |
+| **Messages**     | Typed communication graph between agents                                                |
+| **Reviews**      | Critique → revision loops with auto-escalation                                          |
 
 The orchestrator is the only agent that sees the full picture. Individual specialists see a filtered view based on the [sharing strategy](#choose-a-sharing-strategy).
 
@@ -113,8 +115,8 @@ Each table has a foreign key to `team_session` with `ON DELETE CASCADE`. Compoun
 src/team/
 ├── index.ts              Team namespace (create, start, cancel, status)
 ├── team.sql.ts           Drizzle schema (5 tables)
-├── orchestrator.ts       Orchestrator loop (11 actions, phase budgets)
-├── execute.ts            Execution bridge (context building, output parsing)
+├── orchestrator.ts       Orchestrator loop (12 actions, parallel execution, phase budgets)
+├── execute.ts            Execution bridge (multi-step, context building, output parsing)
 ├── roster.ts             Agent lifecycle
 ├── workspace.ts          Shared state CRUD
 ├── message.ts            Team message graph (10 types)
@@ -136,6 +138,107 @@ src/tool/
 src/command/template/
 └── team.txt              /team command template ($ARGUMENTS → tool call)
 ```
+
+---
+
+## Understand multi-step execution
+
+Agents can break complex assignments into multiple steps. This is the core mechanism that lets a single assignment like "implement auth with tests" decompose into iterative work without the orchestrator needing to micro-manage every sub-step.
+
+---
+
+### Know how it works
+
+When the orchestrator assigns a task, it calls `Execute.runMultiStep()` instead of a single-shot `Execute.run()`. Here's what happens:
+
+1. **Step 0**: The agent receives its task and full workspace context via `run()`. It enters a full agentic loop (tool calls, file edits, bash commands) via `SessionPrompt.prompt()`.
+2. **Agent signals `[CONTINUE]`**: If the agent has more work, it outputs `[CONTINUE]` with a description of the next step.
+3. **Context refresh**: The system calls `buildContinueMessage()`, which re-reads the workspace. The agent sees decisions and artifacts from other agents that may have run concurrently.
+4. **Step N**: The continuation prompt is sent to the same agent session, preserving conversation history. The agent runs another full agentic loop.
+5. **Loop ends**: When the agent outputs `[COMPLETE]`, stops outputting `[CONTINUE]`, errors, or hits the max sub-step limit (10).
+6. **Merge**: All step results are merged into a single `AgentResult` — proposals, artifacts, tool calls, and concerns are concatenated across steps.
+
+---
+
+### Use the continue signal
+
+Agents signal continuation in their output using the `[CONTINUE]` tag. It works like all other output tags.
+
+```txt frame="none"
+I've implemented the login endpoint and added input validation.
+
+[ARTIFACT]
+Created src/auth/login.ts with JWT-based authentication.
+
+[CONTINUE]
+Next: Write unit tests for the login endpoint and integration tests for the auth flow.
+```
+
+On the next step, the agent gets a message that includes:
+
+- Updated workspace summary (with any new decisions or artifacts from other agents)
+- Summary of what the previous step accomplished
+- The `[CONTINUE]` description as "Your Next Step"
+- Any questions routed to this agent since the last step
+
+---
+
+### Track sub-step progress
+
+Each sub-step is visible in the TODO sidebar and in the team message log. The orchestrator sees `[STEP N]` status messages as agents progress.
+
+```txt frame="none"
+ Todo
+  ● [developer] Implement auth system
+    ✓ Implement auth system
+    ● Write unit tests for auth flow
+```
+
+If an agent hits the max sub-step limit (10), the system sends an `[INCOMPLETE]` status message. The orchestrator can then re-assign the remaining work with a new `assign` action.
+
+---
+
+### Know the limits
+
+| Limit         | Value | What happens when hit                                              |
+| ------------- | ----- | ------------------------------------------------------------------ |
+| Max sub-steps | 10    | Agent is stopped, `[INCOMPLETE]` message sent to orchestrator      |
+| `[COMPLETE]`  | —     | Loop ends immediately, even if `[CONTINUE]` is also present        |
+| Error         | —     | Loop ends, agent status reset to `idle`, partial results preserved |
+
+The merged result across all steps is what gets passed to the orchestrator's `processAgentResult`. All proposals, questions, concerns, artifacts, tool calls, and critiques from every step are included.
+
+---
+
+## Run agents in parallel
+
+When the orchestrator staffs a team or uses `parallel_assign`, agents with independent tasks run concurrently. This cuts total wall-clock time significantly — three 30-second agents finish in ~30 seconds instead of 90.
+
+---
+
+### Know how it works
+
+The `staff` action spawns agents sequentially (each needs its own session), then runs their initial tasks in parallel via `Promise.allSettled`. The `parallel_assign` action does the same for subsequent rounds of concurrent work.
+
+Each parallel agent gets its own `TaskEntry` with sub-step tracking. Failures in one agent don't block others — `Promise.allSettled` collects all results and logs any errors as status messages.
+
+---
+
+### Stay safe with concurrency
+
+Parallel agents write to the same shared workspace. Three protections make this safe:
+
+- **`Workspace.set` and `append`** use `Database.transaction` so each read-modify-write is atomic. Two agents appending to the same section can't lose each other's data.
+- **`Workspace.merge`** provides an atomic read → transform → write pattern for JSON object sections. The orchestrator uses this for `modified_files` and `commands_run` in the artifacts section.
+- **`Roster.incrementSteps` and `incrementTokens`** use SQL-level `SET col = col + N` instead of read-then-write, so concurrent agents can't corrupt each other's counters.
+
+---
+
+### Know when to use it
+
+Use `parallel_assign` when tasks are independent — different files, different modules, no data dependencies between agents. The orchestrator's prompt includes guidelines for this.
+
+Avoid it when one agent's output is needed as input for another, or when agents will modify the same files. Use sequential `assign` instead.
 
 ---
 
@@ -190,7 +293,7 @@ Nine built-in role templates are available. The orchestrator picks the right one
 | **UX reviewer**            | Usability, accessibility, WCAG compliance        | Yes         |
 | **Documentation writer**   | Technical writing, API docs, user guides         | Yes         |
 
-Each template defines a system prompt, workspace read/write permissions, and expertise tags. Every spawned agent gets its own OpenCode session as a child of the calling session.
+Each template defines a system prompt, workspace read/write permissions, and expertise tags. Every spawned agent gets its own OpenCode session as a child of the calling session. All agent prompts include instructions for multi-step execution via the `[CONTINUE]` signal.
 
 ---
 
@@ -226,23 +329,24 @@ The `workspaceRead` and `workspaceWrite` arrays control which workspace sections
 
 ## Know the actions
 
-The orchestrator drives the team by emitting one JSON action per turn. There are 11 actions.
+The orchestrator drives the team by emitting one JSON action per turn. There are 12 actions.
 
-| Action     | Key fields           | Purpose                                             |
-| ---------- | -------------------- | --------------------------------------------------- |
-| `staff`    | `roles[]`            | Spawn multiple agents and assign initial tasks      |
-| `assign`   | `role`, `task`       | Give a task to an existing agent                    |
-| `spawn`    | `role`, `reason`     | Add a single new specialist to the roster           |
-| `retire`   | `role`, `reason`     | Remove an agent that's no longer needed             |
-| `route`    | `from`, `to`         | Forward a question from one agent to another        |
-| `decide`   | `description`        | Record an architectural or design decision          |
-| `escalate` | `question`           | Ask the user a question when the team is stuck      |
-| `advance`  | `phase`, `summary`   | Move to the next phase                              |
-| `review`   | `author`, `reviewer` | Trigger a review loop between two agents            |
-| `mediate`  | `review_id`          | Resolve an escalated review with a binding decision |
-| `complete` | `summary`            | End the session with a summary                      |
+| Action            | Key fields           | Purpose                                                 |
+| ----------------- | -------------------- | ------------------------------------------------------- |
+| `staff`           | `roles[]`            | Spawn multiple agents and run initial tasks in parallel |
+| `assign`          | `role`, `task`       | Give a task to an existing agent                        |
+| `parallel_assign` | `assignments[]`      | Run multiple agents concurrently on independent tasks   |
+| `spawn`           | `role`, `reason`     | Add a single new specialist to the roster               |
+| `retire`          | `role`, `reason`     | Remove an agent that's no longer needed                 |
+| `route`           | `from`, `to`         | Forward a question from one agent to another            |
+| `decide`          | `description`        | Record an architectural or design decision              |
+| `escalate`        | `question`           | Ask the user a question when the team is stuck          |
+| `advance`         | `phase`, `summary`   | Move to the next phase                                  |
+| `review`          | `author`, `reviewer` | Trigger a review loop between two agents                |
+| `mediate`         | `review_id`          | Resolve an escalated review with a binding decision     |
+| `complete`        | `summary`            | End the session with a summary                          |
 
-Actions are parsed from JSON, optionally wrapped in a markdown code block. Invalid actions are retried.
+Actions are parsed from JSON, optionally wrapped in a markdown code block. Invalid actions are retried. The `staff`, `assign`, `route`, and `parallel_assign` actions use multi-step execution. `staff` and `parallel_assign` run agents in parallel.
 
 ---
 
@@ -256,7 +360,7 @@ The orchestrator follows sizing heuristics from its system prompt.
 - **Performance-critical**: add Performance Specialist
 - **Database changes**: add Database Specialist
 
-It starts minimal and spawns more agents as needed.
+It starts minimal and spawns more agents as needed. The orchestrator runs initial tasks in parallel after staffing and can use `parallel_assign` for subsequent concurrent work. It doesn't need to micro-manage sub-steps — it assigns the full task and lets agents decompose it.
 
 ---
 
@@ -285,16 +389,17 @@ Messages can be targeted (agent-to-agent) or broadcast (to the whole team). Each
 
 Agents use tag-based structured output. The execution layer parses these from the LLM response.
 
-| Tag                | Extracted to              | Purpose                         |
-| ------------------ | ------------------------- | ------------------------------- |
-| `[PROPOSAL]`       | `proposals[]`             | Design or architecture proposal |
-| `[QUESTION: role]` | `questions[]`             | Ask a specific agent a question |
-| `[CONCERN: topic]` | `concerns[]`              | Flag a concern for the team     |
-| `[ARTIFACT]`       | `artifacts[]`             | Code, config, or deliverable    |
-| `[SPAWN: role]`    | `spawnRequests[]`         | Request a specialist be added   |
-| `[CRITIQUE]`       | `critiques[]`             | Review feedback on an artifact  |
-| `[COMPLETE]`       | `complete` flag + summary | Agent signals task is done      |
-| `[APPROVED]`       | `approved` flag           | Reviewer approves the artifact  |
+| Tag                | Extracted to              | Purpose                                  |
+| ------------------ | ------------------------- | ---------------------------------------- |
+| `[PROPOSAL]`       | `proposals[]`             | Design or architecture proposal          |
+| `[QUESTION: role]` | `questions[]`             | Ask a specific agent a question          |
+| `[CONCERN: topic]` | `concerns[]`              | Flag a concern for the team              |
+| `[ARTIFACT]`       | `artifacts[]`             | Code, config, or deliverable             |
+| `[SPAWN: role]`    | `spawnRequests[]`         | Request a specialist be added            |
+| `[CRITIQUE]`       | `critiques[]`             | Review feedback on an artifact           |
+| `[CONTINUE]`       | `continuing` flag + desc  | Agent has more work, describes next step |
+| `[COMPLETE]`       | `complete` flag + summary | Agent signals task is done               |
+| `[APPROVED]`       | `approved` flag           | Reviewer approves the artifact           |
 
 Tags are case-insensitive. Each tag's content extends to the next tag or end of text.
 
@@ -323,7 +428,7 @@ The workspace is shared state organized into 8 sections, initialized when a sess
 | `artifacts`    | object | `{}`                | Code, configs, and outputs      |
 | `agent_states` | object | `{}`                | Per-agent working state         |
 
-Each section is versioned and tracks who last updated it. The workspace supports `get`, `set`, `append`, and `remove` operations.
+Each section is versioned and tracks who last updated it. The workspace supports `get`, `set`, `append`, `remove`, and `merge` operations — all write operations use `Database.transaction` for atomic read-modify-write. Between multi-step iterations, agents see refreshed workspace data — including decisions and artifacts added by other agents running in parallel.
 
 ---
 
@@ -452,7 +557,7 @@ Every agent on the roster has a status the orchestrator monitors.
 | `waiting` | Blocked on input from another |
 | `retired` | Removed from the team         |
 
-Retired agents are excluded from active lookups but remain in the database. The roster also tracks `steps_used` and `tokens_consumed` per agent.
+Retired agents are excluded from active lookups but remain in the database. The roster also tracks `steps_used` and `tokens_consumed` per agent using atomic SQL-level increments, safe for concurrent updates during parallel execution.
 
 ---
 
@@ -525,6 +630,8 @@ The module includes 12 prompt templates in `src/team/prompt/`.
 | `reviewer-instructions.txt`  | Review loop (reviewer)  | How to critique artifacts                      |
 | `revision-instructions.txt`  | Review loop (author)    | How to address critique feedback               |
 
+All agent prompts (except reviewer/revision instructions) include the `[CONTINUE]` signal documentation and multi-step task instructions. The orchestrator prompt includes a "Multi-step Execution" section explaining how `[STEP N]` and `[INCOMPLETE]` messages work.
+
 ---
 
 ## Use the API
@@ -550,7 +657,7 @@ When the team needs user input, the tool uses the question system to prompt you 
 
 `Team.start()` creates a session and runs the orchestrator loop to completion.
 
-```ts
+```ts title="team-start.ts"
 const result = await Team.start({
   goal: "Build a REST API with auth",
   sharingStrategy: "selective",
@@ -576,7 +683,7 @@ The `onEscalate` callback fires when the orchestrator uses the `escalate` action
 
 `Team.status()` returns the current state of a session.
 
-```ts
+```ts title="team-status.ts"
 const status = Team.status(teamSessionID)
 // status.info — session metadata (phase, status, strategy)
 // status.roster — active agents with role, status, expertise
@@ -595,7 +702,7 @@ Returns `undefined` for non-existent sessions. When `artifacts` exist but contai
 
 `Team.cancel()` retires all agents, sets the status to `cancelled`, and emits a `team.updated` event.
 
-```ts
+```ts title="team-cancel.ts"
 Team.cancel(teamSessionID)
 ```
 
@@ -610,16 +717,17 @@ Restart the OpenCode server and TUI to pick up the new tool registration, migrat
 ```
 
 :::caution
-The session may take several minutes depending on task complexity and model speed. Each agent runs its own LLM calls sequentially through the orchestrator loop.
+The session may take several minutes depending on task complexity and model speed. Initial tasks run in parallel when a team is staffed, but subsequent orchestrator actions are processed one at a time.
 :::
 
 Watch for these steps in the output:
 
 1. **Tool call** — the LLM calls the `team` tool with your goal
-2. **Staffing** — the orchestrator spawns agents (likely Architect + Developer + QA)
-3. **Phase progression** — understanding → design → implementation → verification → complete
-4. **Review cycles** — critique → revision exchanges between agents
-5. **Completion** — a summary with the roster and recent activity
+2. **Staffing** — the orchestrator spawns agents (likely Architect + Developer + QA) and runs their initial tasks in parallel
+3. **Parallel + multi-step progress** — agents run concurrently, each breaking complex tasks into sub-steps visible as `[STEP N]` messages and sub-items in the TODO sidebar
+4. **Phase progression** — understanding → design → implementation → verification → complete
+5. **Review cycles** — critique → revision exchanges between agents
+6. **Completion** — a summary with the roster and recent activity
 
 If the team needs your input, you'll see a question prompt in the TUI.
 
@@ -627,7 +735,7 @@ If the team needs your input, you'll see a question prompt in the TUI.
 
 ## Run the tests
 
-The module has 419 tests across 13 files.
+The module has 473 tests across 14 files.
 
 ```bash frame="none"
 bun test test/team/
@@ -641,21 +749,22 @@ Run from the `packages/opencode` directory. Tests cannot be run from the repo ro
 
 ### Know what's covered
 
-| Test file                    | Area               | What it tests                                                                                                                 |
-| ---------------------------- | ------------------ | ----------------------------------------------------------------------------------------------------------------------------- |
-| `team-db`                    | Database           | End-to-end CRUD for workspace, messages, and reviews against real SQLite                                                      |
-| `schema-comprehensive`       | Schema             | All 5 tables: insert, read back, enum values, FK cascades, JSON columns                                                       |
-| `workspace-comprehensive`    | Workspace          | Create, get/set/append/remove (updatedBy), decisions, questions, answers, summary (nonexistent)                               |
-| `roster-comprehensive`       | Agent lifecycle    | Spawn (parentSessionID + bus event), retire, setStatus, incrementSteps/Tokens, shouldRetire (all statuses), filtering         |
-| `message-comprehensive`      | Messages           | Send, recent, forRole (default limit), byType, bus event emission, all 10 types                                               |
-| `review-comprehensive`       | Reviews            | Create, approve, escalate (incl. nonexistent), incrementRound, critique/revision, history, event non-emission                 |
-| `review-loop-comprehensive`  | Review loop        | extractRevised with `[ARTIFACT]` tags, fallback, `## Revision Summary`                                                        |
-| `roles-comprehensive`        | Roles              | All 9 templates, get/list/register (visibility in list + match), signal matching, scoring                                     |
-| `execute-comprehensive`      | Execution          | parseOutput (all 8 tags + edge cases), buildContext, buildMessage, extractAssistantText, summarizeToolCalls, extractToolCalls |
-| `orchestrator-comprehensive` | Orchestrator       | parseAction (all 11 types + edge cases), extractText, forceAdvance, phase validation, TODO sync patterns                      |
-| `sharing-comprehensive`      | Sharing strategies | All 3 strategies: buildContext, propagate (incl. unsupported ops), summarize, resolve, empty section filtering                |
-| `hooks-comprehensive`        | Events             | All 14 events mapped to correct BusEvent definitions                                                                          |
-| `team-index-comprehensive`   | Team namespace     | create (all strategies), get, cancel (+ Updated event), status (modifiedFiles/commandsRun/edge cases), schemas, events        |
+| Test file                    | Area               | What it tests                                                                                                                                                      |
+| ---------------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `team-db`                    | Database           | End-to-end CRUD for workspace, messages, and reviews against real SQLite                                                                                           |
+| `schema-comprehensive`       | Schema             | All 5 tables: insert, read back, enum values, FK cascades, JSON columns                                                                                            |
+| `workspace-comprehensive`    | Workspace          | Create, get/set/append/remove (updatedBy), decisions, questions, answers, summary, concurrent appends, atomic merge                                                |
+| `roster-comprehensive`       | Agent lifecycle    | Spawn (parentSessionID + bus event), retire, setStatus, atomic incrementSteps/Tokens, shouldRetire (all statuses), concurrent increments                           |
+| `message-comprehensive`      | Messages           | Send, recent, forRole (default limit), byType, bus event emission, all 10 types                                                                                    |
+| `review-comprehensive`       | Reviews            | Create, approve, escalate (incl. nonexistent), incrementRound, critique/revision, history, event non-emission                                                      |
+| `review-loop-comprehensive`  | Review loop        | extractRevised with `[ARTIFACT]` tags, fallback, `## Revision Summary`                                                                                             |
+| `roles-comprehensive`        | Roles              | All 9 templates, get/list/register (visibility in list + match), signal matching, scoring                                                                          |
+| `execute-comprehensive`      | Execution          | parseOutput (all 9 tags incl. `[CONTINUE]` + edge cases), buildContext, buildMessage, buildContinueMessage, mergeResults, extractAssistantText, summarizeToolCalls |
+| `orchestrator-comprehensive` | Orchestrator       | parseAction (all 12 types incl. `parallel_assign` + edge cases), extractText, forceAdvance, phase validation, TODO sync with sub-steps                             |
+| `sharing-comprehensive`      | Sharing strategies | All 3 strategies: buildContext, propagate (incl. unsupported ops), summarize, resolve, empty section filtering                                                     |
+| `hooks-comprehensive`        | Events             | All 14 events mapped to correct BusEvent definitions                                                                                                               |
+| `team-index-comprehensive`   | Team namespace     | create (all strategies), get, cancel (+ Updated event), status (modifiedFiles/commandsRun/edge cases), schemas, events                                             |
+| `integration`                | Integration        | Real import chain validation, lazy `await import()`, Team.start() entry point, strategy resolve, Roster.spawn with sessions                                        |
 
 ---
 
@@ -663,12 +772,12 @@ Run from the `packages/opencode` directory. Tests cannot be run from the repo ro
 
 Functions that call `SessionPrompt.prompt()` need a real LLM provider and can't be unit tested. These are:
 
-- `Execute.run()` — runs an agent against the LLM
+- `Execute.run()` / `Execute.runMultiStep()` — runs an agent against the LLM (single-shot and iterative)
 - `Orchestrator.run()` — the main orchestrator loop
 - `ReviewLoop.run()` — the critique-revision cycle
 - `Team.start()` — creates a session and runs the orchestrator
 
-`Roster.spawn()` is fully tested — it creates real sessions via `Session.create()` and verifies parent-child relationships, session titles, and bus event emission.
+`Roster.spawn()` is fully tested — it creates real sessions via `Session.create()` and verifies parent-child relationships, session titles, and bus event emission. The `parseOutput` tests cover all 9 output tags including `[CONTINUE]` signal extraction, `buildContinueMessage` is tested with workspace context refresh, and `mergeResults` is tested directly. Concurrent workspace operations (`append`, `merge`) and atomic roster increments are tested with `Promise.all` to verify safety under parallel execution.
 
 ---
 
@@ -679,5 +788,5 @@ Tests use `Instance.provide({ directory, fn })` for database access, with `test/
 Helper functions like `createTeamSession()` insert directly into tables via `Database.use()` to avoid triggering full creation flows. Bus events are verified with `Bus.subscribe()` and a short `setTimeout` to allow delivery.
 
 ```bash frame="none"
-bun test test/team/workspace-comprehensive.test.ts
+bun test test/team/execute-comprehensive.test.ts
 ```

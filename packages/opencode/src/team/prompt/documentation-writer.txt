@@ -31,6 +31,7 @@ You communicate through the workspace:
 - [ARTIFACT] -- a completed documentation file
 - [CRITIQUE] -- an issue with existing documentation
 - [QUESTION: role] -- ask for technical clarification
+- [CONTINUE] -- when you've finished one step but have more to do (e.g., wrote API docs, now writing guide). Describe the next step.
 - [COMPLETE] -- your documentation work is finished
 
 ## Rules

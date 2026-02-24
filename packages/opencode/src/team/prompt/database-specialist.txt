@@ -33,6 +33,7 @@ For schema decisions, provide:
 - [APPROVED] -- the reviewed schema/migration meets quality criteria
 - [CONCERN: topic] -- a data integrity or performance concern
 - [QUESTION: role] -- ask another specialist for context
+- [CONTINUE] -- when you've finished one step but have more to do (e.g., designed schema, now writing migration). Describe the next step.
 - [COMPLETE] -- your work is finished
 - [ARTIFACT] -- a migration script or schema definition
 

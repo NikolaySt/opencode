@@ -805,3 +805,242 @@ describe("team.workspace edge cases", () => {
     })
   })
 })
+
+describe("team.workspace.atomicity", () => {
+  test("concurrent appends to same section preserve all items", async () => {
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const teamID = createTeamSession(Instance.project.id)
+        Workspace.create(teamID, "Concurrency test")
+
+        // Simulate concurrent appends — SQLite serializes them but
+        // with Database.transaction each append is atomic
+        const count = 20
+        const promises = Array.from({ length: count }, (_, i) =>
+          Promise.resolve().then(() =>
+            Workspace.addDecision(teamID, {
+              description: `Decision ${i}`,
+              rationale: `Reason ${i}`,
+              alternatives: [],
+              made_by: `agent-${i}`,
+              status: "approved",
+            }),
+          ),
+        )
+        await Promise.all(promises)
+
+        const decisions = Workspace.get(teamID, "decisions") as Workspace.Decision[]
+        expect(decisions).toHaveLength(count)
+        // Verify all decisions are present (order may vary)
+        const descriptions = new Set(decisions.map((d) => d.description))
+        for (let i = 0; i < count; i++) {
+          expect(descriptions.has(`Decision ${i}`)).toBe(true)
+        }
+      },
+    })
+  })
+
+  test("concurrent questions to same section preserve all items", async () => {
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const teamID = createTeamSession(Instance.project.id)
+        Workspace.create(teamID, "Concurrency test")
+
+        const count = 15
+        const promises = Array.from({ length: count }, (_, i) =>
+          Promise.resolve().then(() =>
+            Workspace.addQuestion(teamID, {
+              question: `Question ${i}`,
+              asked_by: `agent-${i}`,
+              routed_to: "orchestrator",
+              status: "open",
+            }),
+          ),
+        )
+        await Promise.all(promises)
+
+        const questions = Workspace.get(teamID, "questions") as Workspace.Question[]
+        expect(questions).toHaveLength(count)
+      },
+    })
+  })
+
+  test("concurrent merge operations on artifacts preserve all data", async () => {
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const teamID = createTeamSession(Instance.project.id)
+        Workspace.create(teamID, "Merge test")
+
+        // Simulate multiple agents recording file modifications concurrently
+        const agents = ["developer", "architect", "qa"]
+        const promises = agents.map((agent, i) =>
+          Promise.resolve().then(() =>
+            Workspace.merge(
+              teamID,
+              "artifacts",
+              (raw) => {
+                const obj = (raw as Record<string, unknown>) ?? {}
+                const modified = ((obj.modified_files as string[]) ?? []).concat([`src/${agent}/file${i}.ts`])
+                return { ...obj, modified_files: [...new Set(modified)] }
+              },
+              agent,
+            ),
+          ),
+        )
+        await Promise.all(promises)
+
+        const artifacts = Workspace.get(teamID, "artifacts") as Record<string, unknown>
+        const files = artifacts.modified_files as string[]
+        expect(files).toHaveLength(3)
+        expect(files).toContain("src/developer/file0.ts")
+        expect(files).toContain("src/architect/file1.ts")
+        expect(files).toContain("src/qa/file2.ts")
+      },
+    })
+  })
+
+  test("set uses transaction (version increments atomically)", async () => {
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const teamID = createTeamSession(Instance.project.id)
+        Workspace.create(teamID, "Version test")
+
+        // Set the same section multiple times
+        Workspace.set(teamID, "goal", "Version 2", "agent-a")
+        Workspace.set(teamID, "goal", "Version 3", "agent-b")
+        Workspace.set(teamID, "goal", "Version 4", "agent-c")
+
+        const result = Workspace.get(teamID, "goal")
+        expect(result).toBe("Version 4")
+      },
+    })
+  })
+
+  test("concurrent removes from same section preserve correct items", async () => {
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const teamID = createTeamSession(Instance.project.id)
+        Workspace.create(teamID, "Remove concurrency test")
+
+        // Seed 20 questions into the workspace
+        const count = 20
+        const questions: Workspace.Question[] = []
+        for (let i = 0; i < count; i++) {
+          const q = Workspace.addQuestion(teamID, {
+            question: `Q${i}`,
+            asked_by: `agent-${i}`,
+            status: "open",
+          })
+          questions.push(q)
+        }
+        const before = Workspace.get(teamID, "questions") as Workspace.Question[]
+        expect(before).toHaveLength(count)
+
+        // Concurrently remove the even-numbered questions
+        const toRemove = questions.filter((_, i) => i % 2 === 0)
+        const promises = toRemove.map((q) =>
+          Promise.resolve().then(() => Workspace.remove(teamID, "questions", "id", q.id, `remover-${q.id}`)),
+        )
+        await Promise.all(promises)
+
+        const after = Workspace.get(teamID, "questions") as Workspace.Question[]
+        // Only odd-indexed questions should remain
+        expect(after).toHaveLength(count - toRemove.length)
+        const remaining = new Set(after.map((q) => q.question))
+        for (let i = 0; i < count; i++) {
+          if (i % 2 === 0) expect(remaining.has(`Q${i}`)).toBe(false)
+          else expect(remaining.has(`Q${i}`)).toBe(true)
+        }
+      },
+    })
+  })
+
+  test("concurrent answerQuestion calls preserve all answers", async () => {
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const teamID = createTeamSession(Instance.project.id)
+        Workspace.create(teamID, "Answer concurrency test")
+
+        // Seed 15 open questions
+        const count = 15
+        const questions: Workspace.Question[] = []
+        for (let i = 0; i < count; i++) {
+          const q = Workspace.addQuestion(teamID, {
+            question: `Question ${i}`,
+            asked_by: `asker-${i}`,
+            status: "open",
+          })
+          questions.push(q)
+        }
+
+        // Concurrently answer all questions
+        const promises = questions.map((q, i) =>
+          Promise.resolve().then(() => Workspace.answerQuestion(teamID, q.id, `Answer ${i}`, `responder-${i}`)),
+        )
+        await Promise.all(promises)
+
+        const result = Workspace.get(teamID, "questions") as Workspace.Question[]
+        expect(result).toHaveLength(count)
+        // Every question should now be answered
+        const answered = result.filter((q) => q.status === "answered")
+        expect(answered).toHaveLength(count)
+        // Verify all answers are present
+        const answers = new Set(answered.map((q) => q.answer))
+        for (let i = 0; i < count; i++) {
+          expect(answers.has(`Answer ${i}`)).toBe(true)
+        }
+      },
+    })
+  })
+
+  test("merge on non-existent workspace returns without error", async () => {
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        // No workspace created — merge should silently return
+        Workspace.merge(
+          "team_nonexistent_999",
+          "artifacts",
+          (current) => ({ ...((current as object) ?? {}), key: "value" }),
+          "agent",
+        )
+        // If we got here without throwing, the test passes
+        expect(true).toBe(true)
+      },
+    })
+  })
+
+  test("merge emits Updated bus event", async () => {
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const teamID = createTeamSession(Instance.project.id)
+        Workspace.create(teamID, "Merge event test")
+
+        let received = false
+        const unsub = Bus.subscribe(Workspace.Event.Updated, (event) => {
+          if (event.properties.section === "artifacts" && event.properties.updatedBy === "merge-agent") {
+            received = true
+          }
+        })
+
+        Workspace.merge(
+          teamID,
+          "artifacts",
+          (current) => ({ ...((current as object) ?? {}), foo: "bar" }),
+          "merge-agent",
+        )
+        await new Promise((r) => setTimeout(r, 50))
+
+        unsub()
+        expect(received).toBe(true)
+      },
+    })
+  })
+})

@@ -1,6 +1,6 @@
 import z from "zod"
 import { Identifier } from "@/id/id"
-import { Database, eq, and } from "@/storage/db"
+import { Database, eq, and, sql } from "@/storage/db"
 import { AgentInstanceTable } from "./team.sql"
 import { Session } from "@/session"
 import { Bus } from "@/bus"
@@ -241,14 +241,12 @@ export namespace Roster {
     return { retire: true, reason: "no active tasks or reviews" }
   }
 
-  /** Increment steps counter for an agent */
+  /** Increment steps counter for an agent (atomic SQL-level increment) */
   export function incrementSteps(agentID: string, count = 1) {
     Database.use((db) => {
-      const current = db.select().from(AgentInstanceTable).where(eq(AgentInstanceTable.id, agentID)).get()
-      if (!current) return
       db.update(AgentInstanceTable)
         .set({
-          steps_used: current.steps_used + count,
+          steps_used: sql`${AgentInstanceTable.steps_used} + ${count}`,
           time_updated: Date.now(),
         })
         .where(eq(AgentInstanceTable.id, agentID))
@@ -256,14 +254,12 @@ export namespace Roster {
     })
   }
 
-  /** Increment tokens counter for an agent */
+  /** Increment tokens counter for an agent (atomic SQL-level increment) */
   export function incrementTokens(agentID: string, count: number) {
     Database.use((db) => {
-      const current = db.select().from(AgentInstanceTable).where(eq(AgentInstanceTable.id, agentID)).get()
-      if (!current) return
       db.update(AgentInstanceTable)
         .set({
-          tokens_consumed: current.tokens_consumed + count,
+          tokens_consumed: sql`${AgentInstanceTable.tokens_consumed} + ${count}`,
           time_updated: Date.now(),
         })
         .where(eq(AgentInstanceTable.id, agentID))

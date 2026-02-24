@@ -260,6 +260,99 @@ describe("team.orchestrator.parseAction", () => {
     // Greedy match captures from first { to last }, which is invalid JSON
     expect(result).toBeUndefined()
   })
+
+  test("parses parallel_assign action", () => {
+    const result = Orchestrator.parseAction(
+      JSON.stringify({
+        action: "parallel_assign",
+        assignments: [
+          { role: "developer", task: "Build login endpoint" },
+          { role: "qa", task: "Write tests for auth flow" },
+        ],
+      }),
+    )
+    expect(result).toBeDefined()
+    expect(result!.action).toBe("parallel_assign")
+    if (result!.action === "parallel_assign") {
+      expect(result!.assignments).toHaveLength(2)
+      expect(result!.assignments[0].role).toBe("developer")
+      expect(result!.assignments[1].role).toBe("qa")
+    }
+  })
+
+  test("parses parallel_assign with single assignment", () => {
+    const result = Orchestrator.parseAction(
+      JSON.stringify({
+        action: "parallel_assign",
+        assignments: [{ role: "developer", task: "Solo task" }],
+      }),
+    )
+    expect(result).toBeDefined()
+    expect(result!.action).toBe("parallel_assign")
+  })
+
+  test("rejects parallel_assign with empty assignments", () => {
+    // Empty array is valid for z.array() by default, so this should parse
+    const result = Orchestrator.parseAction(JSON.stringify({ action: "parallel_assign", assignments: [] }))
+    expect(result).toBeDefined()
+    expect(result!.action).toBe("parallel_assign")
+  })
+
+  test("rejects parallel_assign missing assignments field", () => {
+    const result = Orchestrator.parseAction(JSON.stringify({ action: "parallel_assign" }))
+    expect(result).toBeUndefined()
+  })
+
+  test("parses parallel_assign from code block", () => {
+    const text =
+      "Let's run these in parallel:\n```json\n" +
+      JSON.stringify({
+        action: "parallel_assign",
+        assignments: [
+          { role: "architect", task: "Design schema" },
+          { role: "developer", task: "Scaffold project" },
+          { role: "qa", task: "Plan test strategy" },
+        ],
+      }) +
+      "\n```"
+    const result = Orchestrator.parseAction(text)
+    expect(result).toBeDefined()
+    expect(result!.action).toBe("parallel_assign")
+    if (result!.action === "parallel_assign") {
+      expect(result!.assignments).toHaveLength(3)
+    }
+  })
+
+  test("rejects parallel_assign with invalid assignment structure", () => {
+    // Assignments array items must have role and task strings
+    const result = Orchestrator.parseAction(
+      JSON.stringify({
+        action: "parallel_assign",
+        assignments: [{ role: 123, task: "something" }],
+      }),
+    )
+    expect(result).toBeUndefined()
+  })
+
+  test("rejects parallel_assign with missing task in assignment", () => {
+    const result = Orchestrator.parseAction(
+      JSON.stringify({
+        action: "parallel_assign",
+        assignments: [{ role: "developer" }],
+      }),
+    )
+    expect(result).toBeUndefined()
+  })
+
+  test("rejects parallel_assign with missing role in assignment", () => {
+    const result = Orchestrator.parseAction(
+      JSON.stringify({
+        action: "parallel_assign",
+        assignments: [{ task: "Build the feature" }],
+      }),
+    )
+    expect(result).toBeUndefined()
+  })
 })
 
 describe("team.orchestrator.extractText", () => {
@@ -396,6 +489,81 @@ describe("Todo API (used by orchestrator.syncTodos)", () => {
 
         Todo.update({ sessionID, todos: [] })
         expect(Todo.get(sessionID)).toHaveLength(0)
+      },
+    })
+  })
+
+  test("writes sub-step style TODOs (as syncTodos would)", async () => {
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const sessionID = createSession(Instance.project.id, projectRoot)
+
+        // Simulate what syncTodos produces with sub-steps
+        const todos: Todo.Info[] = [
+          { content: "Phase: understanding", status: "completed", priority: "high" },
+          { content: "Phase: design", status: "in_progress", priority: "high" },
+          { content: "Phase: implementation", status: "pending", priority: "high" },
+          { content: "Phase: verification", status: "pending", priority: "high" },
+          { content: "[developer] Build login endpoint", status: "in_progress", priority: "medium" },
+          { content: "  - Scaffold endpoint structure", status: "completed", priority: "low" },
+          { content: "  - Write unit tests", status: "in_progress", priority: "low" },
+          { content: "[architect] Design API schema", status: "completed", priority: "medium" },
+        ]
+
+        Todo.update({ sessionID, todos })
+        const result = Todo.get(sessionID)
+
+        expect(result).toHaveLength(8)
+        // Phase items
+        expect(result[0]).toEqual({ content: "Phase: understanding", status: "completed", priority: "high" })
+        expect(result[1]).toEqual({ content: "Phase: design", status: "in_progress", priority: "high" })
+        // Agent task with sub-steps
+        expect(result[4]).toEqual({
+          content: "[developer] Build login endpoint",
+          status: "in_progress",
+          priority: "medium",
+        })
+        expect(result[5]).toEqual({ content: "  - Scaffold endpoint structure", status: "completed", priority: "low" })
+        expect(result[6]).toEqual({ content: "  - Write unit tests", status: "in_progress", priority: "low" })
+        // Another agent task (no sub-steps)
+        expect(result[7]).toEqual({ content: "[architect] Design API schema", status: "completed", priority: "medium" })
+      },
+    })
+  })
+
+  test("sub-step TODOs update correctly when steps complete", async () => {
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const sessionID = createSession(Instance.project.id, projectRoot)
+
+        // Initial state: one sub-step in progress
+        Todo.update({
+          sessionID,
+          todos: [
+            { content: "Phase: implementation", status: "in_progress", priority: "high" },
+            { content: "[developer] Build API", status: "in_progress", priority: "medium" },
+            { content: "  - Step 1: scaffold", status: "in_progress", priority: "low" },
+          ],
+        })
+        expect(Todo.get(sessionID)).toHaveLength(3)
+
+        // After step 1 completes and step 2 starts
+        Todo.update({
+          sessionID,
+          todos: [
+            { content: "Phase: implementation", status: "in_progress", priority: "high" },
+            { content: "[developer] Build API", status: "in_progress", priority: "medium" },
+            { content: "  - Step 1: scaffold", status: "completed", priority: "low" },
+            { content: "  - Step 2: write tests", status: "in_progress", priority: "low" },
+          ],
+        })
+        const result = Todo.get(sessionID)
+        expect(result).toHaveLength(4)
+        expect(result[2].status).toBe("completed")
+        expect(result[3].status).toBe("in_progress")
+        expect(result[3].content).toBe("  - Step 2: write tests")
       },
     })
   })

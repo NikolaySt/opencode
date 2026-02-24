@@ -109,6 +109,16 @@ export namespace Orchestrator {
     summary: z.string(),
   })
 
+  const ParallelAssignAction = z.object({
+    action: z.literal("parallel_assign"),
+    assignments: z.array(
+      z.object({
+        role: z.string(),
+        task: z.string(),
+      }),
+    ),
+  })
+
   const OrchestratorAction = z.discriminatedUnion("action", [
     StaffAction,
     AssignAction,
@@ -121,6 +131,7 @@ export namespace Orchestrator {
     ReviewAction,
     MediateAction,
     CompleteAction,
+    ParallelAssignAction,
   ])
   type OrchestratorAction = z.infer<typeof OrchestratorAction>
 
@@ -129,12 +140,14 @@ export namespace Orchestrator {
   /**
    * Track team progress as TODOs on the parent session so the sidebar
    * shows a live task list. Each phase becomes a TODO, and assigned
-   * agent tasks become sub-items.
+   * agent tasks become sub-items with sub-step detail.
    */
   interface TaskEntry {
     role: string
     task: string
     done: boolean
+    /** Sub-steps tracked when using multi-step execution */
+    subSteps?: Array<{ description: string; done: boolean }>
   }
 
   function syncTodos(parentSessionID: string | undefined, phase: Phase, tasks: TaskEntry[]) {
@@ -155,13 +168,22 @@ export namespace Orchestrator {
       })
     }
 
-    // Agent tasks
+    // Agent tasks with sub-step detail
     for (const t of tasks) {
       todos.push({
         content: `[${t.role}] ${t.task.slice(0, 80)}`,
         status: t.done ? "completed" : "in_progress",
         priority: "medium",
       })
+      if (t.subSteps) {
+        for (const s of t.subSteps) {
+          todos.push({
+            content: `  - ${s.description.slice(0, 60)}`,
+            status: s.done ? "completed" : "in_progress",
+            priority: "low",
+          })
+        }
+      }
     }
 
     Todo.update({ sessionID: parentSessionID, todos })
@@ -293,6 +315,89 @@ export namespace Orchestrator {
     }
   }
 
+  /**
+   * Run multiple agent assignments concurrently using Promise.allSettled.
+   * Each agent gets its own TaskEntry with sub-step tracking. Workspace
+   * writes are safe because set/append/merge use Database.transaction.
+   */
+  async function runParallel(
+    assignments: Array<{ role: string; task: string }>,
+    input: {
+      teamSessionID: string
+      parentSessionID?: string
+      goal: string
+      sharingStrategy?: "selective" | "hierarchical" | "broadcast"
+    },
+    phase: Phase,
+    agentTasks: TaskEntry[],
+  ) {
+    // Build (agent, entry) pairs, skipping missing agents
+    const work: Array<{ agent: Roster.Info; entry: TaskEntry; task: string }> = []
+    for (const a of assignments) {
+      const agent = Roster.get(input.teamSessionID, a.role)
+      if (!agent) {
+        log.warn("agent not found for parallel assignment", { role: a.role })
+        continue
+      }
+      const entry =
+        agentTasks.find((t) => t.role === a.role && !t.done) ??
+        (() => {
+          const e: TaskEntry = { role: a.role, task: a.task, done: false }
+          agentTasks.push(e)
+          return e
+        })()
+      work.push({ agent, entry, task: a.task })
+    }
+
+    if (!work.length) return
+
+    syncTodos(input.parentSessionID, phase, agentTasks)
+
+    log.info("running agents in parallel", {
+      roles: work.map((w) => w.agent.role),
+      count: work.length,
+    })
+
+    const results = await Promise.allSettled(
+      work.map(async ({ agent, entry, task }) => {
+        const multiResult = await Execute.runMultiStep(
+          agent,
+          task,
+          input.teamSessionID,
+          input.goal,
+          phase,
+          input.sharingStrategy,
+          async (step) => {
+            if (!entry.subSteps) entry.subSteps = []
+            entry.subSteps.push({ description: step.description, done: false })
+            for (let i = 0; i < entry.subSteps.length - 1; i++) entry.subSteps[i].done = true
+            syncTodos(input.parentSessionID, phase, agentTasks)
+          },
+        )
+        await processAgentResult(input.teamSessionID, agent, multiResult.merged)
+        entry.done = true
+        if (entry.subSteps) for (const s of entry.subSteps) s.done = true
+        return { role: agent.role, result: multiResult }
+      }),
+    )
+
+    // Log any failures
+    for (const [i, r] of results.entries()) {
+      if (r.status === "rejected") {
+        const role = work[i].agent.role
+        log.error("parallel agent failed", { role, error: r.reason })
+        TeamMessage.send({
+          teamSessionID: input.teamSessionID,
+          fromRole: "system",
+          type: "status",
+          content: `Agent ${role} failed during parallel execution: ${r.reason}`,
+        })
+      }
+    }
+
+    syncTodos(input.parentSessionID, phase, agentTasks)
+  }
+
   export async function run(input: {
     teamSessionID: string
     orchestratorSessionID: string
@@ -397,6 +502,7 @@ export namespace Orchestrator {
 
       switch (action.action) {
         case "staff": {
+          // Spawn all agents first (sequential — each creates a session)
           for (const spec of action.roles) {
             const template = Roles.get(spec.role)
             await Roster.spawn({
@@ -417,24 +523,10 @@ export namespace Orchestrator {
             agentTasks.push({ role: spec.role, task: spec.task, done: false })
           }
           syncTodos(input.parentSessionID, phase, agentTasks)
-          // After staffing, assign initial tasks
-          for (const spec of action.roles) {
-            const agent = Roster.get(input.teamSessionID, spec.role)
-            if (!agent) continue
-            const agentResult = await Execute.run(
-              agent,
-              spec.task,
-              input.teamSessionID,
-              input.goal,
-              phase,
-              input.sharingStrategy,
-            )
-            await processAgentResult(input.teamSessionID, agent, agentResult)
-            // Mark task done after agent completes
-            const entry = agentTasks.find((t) => t.role === spec.role && !t.done)
-            if (entry) entry.done = true
-            syncTodos(input.parentSessionID, phase, agentTasks)
-          }
+
+          // Run initial tasks in parallel
+          const assignments = action.roles.map((spec) => ({ role: spec.role, task: spec.task }))
+          await runParallel(assignments, input, phase, agentTasks)
           break
         }
 
@@ -444,19 +536,26 @@ export namespace Orchestrator {
             log.warn("agent not found for assignment", { role: action.role })
             break
           }
-          agentTasks.push({ role: action.role, task: action.task, done: false })
+          const assignEntry: TaskEntry = { role: action.role, task: action.task, done: false }
+          agentTasks.push(assignEntry)
           syncTodos(input.parentSessionID, phase, agentTasks)
-          const agentResult = await Execute.run(
+          const multiResult = await Execute.runMultiStep(
             agent,
             action.task,
             input.teamSessionID,
             input.goal,
             phase,
             input.sharingStrategy,
+            async (step) => {
+              if (!assignEntry.subSteps) assignEntry.subSteps = []
+              assignEntry.subSteps.push({ description: step.description, done: false })
+              for (let i = 0; i < assignEntry.subSteps.length - 1; i++) assignEntry.subSteps[i].done = true
+              syncTodos(input.parentSessionID, phase, agentTasks)
+            },
           )
-          await processAgentResult(input.teamSessionID, agent, agentResult)
-          const assignEntry = agentTasks.find((t) => t.role === action.role && !t.done)
-          if (assignEntry) assignEntry.done = true
+          await processAgentResult(input.teamSessionID, agent, multiResult.merged)
+          assignEntry.done = true
+          if (assignEntry.subSteps) for (const s of assignEntry.subSteps) s.done = true
           syncTodos(input.parentSessionID, phase, agentTasks)
           break
         }
@@ -498,19 +597,26 @@ export namespace Orchestrator {
           const target = Roster.get(input.teamSessionID, action.to)
           if (target) {
             const routeTask = `Answer question from ${action.from}: ${action.question}`
-            agentTasks.push({ role: action.to, task: routeTask.slice(0, 80), done: false })
+            const routeEntry: TaskEntry = { role: action.to, task: routeTask.slice(0, 80), done: false }
+            agentTasks.push(routeEntry)
             syncTodos(input.parentSessionID, phase, agentTasks)
-            const agentResult = await Execute.run(
+            const multiResult = await Execute.runMultiStep(
               target,
               routeTask,
               input.teamSessionID,
               input.goal,
               phase,
               input.sharingStrategy,
+              async (step) => {
+                if (!routeEntry.subSteps) routeEntry.subSteps = []
+                routeEntry.subSteps.push({ description: step.description, done: false })
+                for (let i = 0; i < routeEntry.subSteps.length - 1; i++) routeEntry.subSteps[i].done = true
+                syncTodos(input.parentSessionID, phase, agentTasks)
+              },
             )
-            await processAgentResult(input.teamSessionID, target, agentResult)
-            const routeEntry = agentTasks.find((t) => t.role === action.to && !t.done)
-            if (routeEntry) routeEntry.done = true
+            await processAgentResult(input.teamSessionID, target, multiResult.merged)
+            routeEntry.done = true
+            if (routeEntry.subSteps) for (const s of routeEntry.subSteps) s.done = true
             syncTodos(input.parentSessionID, phase, agentTasks)
           }
           break
@@ -612,6 +718,11 @@ export namespace Orchestrator {
           syncTodos(input.parentSessionID, phase, agentTasks)
           break
         }
+
+        case "parallel_assign": {
+          await runParallel(action.assignments, input, phase, agentTasks)
+          break
+        }
       }
     }
 
@@ -705,18 +816,25 @@ export namespace Orchestrator {
         content: `[TOOLS] ${summary}`,
       })
 
-      // Record file modifications in workspace artifacts
+      // Record file modifications in workspace artifacts (atomic merge to prevent lost updates)
       const files = result.toolCalls
         .filter((c) => c.tool !== "bash")
         .map((c) => c.input.filePath ?? c.input.file ?? c.input.path)
         .filter(Boolean)
       if (files.length) {
-        const current = (Workspace.get(teamSessionID, "artifacts") as Record<string, unknown>) ?? {}
-        const modified = ((current.modified_files as string[]) ?? []).concat(files.map((f: unknown) => String(f)))
-        Workspace.set(teamSessionID, "artifacts", { ...current, modified_files: [...new Set(modified)] }, agent.role)
+        Workspace.merge(
+          teamSessionID,
+          "artifacts",
+          (raw) => {
+            const obj = (raw as Record<string, unknown>) ?? {}
+            const modified = ((obj.modified_files as string[]) ?? []).concat(files.map((f: unknown) => String(f)))
+            return { ...obj, modified_files: [...new Set(modified)] }
+          },
+          agent.role,
+        )
       }
 
-      // Record bash commands that were run
+      // Record bash commands that were run (atomic merge to prevent lost updates)
       const commands = result.toolCalls
         .filter((c) => c.tool === "bash")
         .map((c) => ({
@@ -725,9 +843,16 @@ export namespace Orchestrator {
           title: c.title,
         }))
       if (commands.length) {
-        const current = (Workspace.get(teamSessionID, "artifacts") as Record<string, unknown>) ?? {}
-        const existing = (current.commands_run as Array<{ command: string; output: string; title: string }>) ?? []
-        Workspace.set(teamSessionID, "artifacts", { ...current, commands_run: [...existing, ...commands] }, agent.role)
+        Workspace.merge(
+          teamSessionID,
+          "artifacts",
+          (raw) => {
+            const obj = (raw as Record<string, unknown>) ?? {}
+            const existing = (obj.commands_run as Array<{ command: string; output: string; title: string }>) ?? []
+            return { ...obj, commands_run: [...existing, ...commands] }
+          },
+          agent.role,
+        )
       }
     }
 
@@ -738,6 +863,17 @@ export namespace Orchestrator {
         fromRole: agent.role,
         type: "status",
         content: `[COMPLETE] ${result.completeSummary ?? "Task finished."}${toolSuffix}`,
+      })
+    }
+
+    // If the merged result still has a continue signal but was force-stopped,
+    // record that so the orchestrator knows it may need to re-assign
+    if (result.continuing && !result.complete) {
+      TeamMessage.send({
+        teamSessionID,
+        fromRole: agent.role,
+        type: "status",
+        content: `[INCOMPLETE] Agent wanted to continue but was stopped. Next step: ${result.continueDescription ?? "unknown"}`,
       })
     }
 

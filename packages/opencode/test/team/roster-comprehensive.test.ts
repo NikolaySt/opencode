@@ -744,3 +744,76 @@ describe("team.roster.spawn with parentSessionID", () => {
     })
   })
 })
+
+describe("team.roster.atomicIncrements", () => {
+  test("incrementSteps uses atomic SQL increment", async () => {
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const teamID = createTeamSession(Instance.project.id)
+        const agentID = insertAgent(teamID, "developer", { steps: 0 })
+
+        // Multiple increments
+        Roster.incrementSteps(agentID)
+        Roster.incrementSteps(agentID)
+        Roster.incrementSteps(agentID)
+
+        const agent = Roster.getByID(agentID)
+        expect(agent).toBeDefined()
+        expect(agent!.stepsUsed).toBe(3)
+      },
+    })
+  })
+
+  test("incrementSteps with custom count", async () => {
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const teamID = createTeamSession(Instance.project.id)
+        const agentID = insertAgent(teamID, "architect", { steps: 5 })
+
+        Roster.incrementSteps(agentID, 3)
+
+        const agent = Roster.getByID(agentID)
+        expect(agent!.stepsUsed).toBe(8)
+      },
+    })
+  })
+
+  test("incrementTokens uses atomic SQL increment", async () => {
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const teamID = createTeamSession(Instance.project.id)
+        const agentID = insertAgent(teamID, "qa", { tokens: 100 })
+
+        Roster.incrementTokens(agentID, 50)
+        Roster.incrementTokens(agentID, 25)
+
+        const agent = Roster.getByID(agentID)
+        expect(agent!.tokensConsumed).toBe(175)
+      },
+    })
+  })
+
+  test("concurrent incrementSteps on different agents is safe", async () => {
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const teamID = createTeamSession(Instance.project.id)
+        const id1 = insertAgent(teamID, "developer", { steps: 0 })
+        const id2 = insertAgent(teamID, "architect", { steps: 0 })
+
+        // Simulate concurrent increments on different agents
+        const promises = [
+          ...Array.from({ length: 5 }, () => Promise.resolve().then(() => Roster.incrementSteps(id1))),
+          ...Array.from({ length: 3 }, () => Promise.resolve().then(() => Roster.incrementSteps(id2))),
+        ]
+        await Promise.all(promises)
+
+        expect(Roster.getByID(id1)!.stepsUsed).toBe(5)
+        expect(Roster.getByID(id2)!.stepsUsed).toBe(3)
+      },
+    })
+  })
+})

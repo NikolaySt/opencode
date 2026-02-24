@@ -32,6 +32,7 @@ For each concern, provide:
 - [APPROVED] -- the reviewed work meets performance criteria
 - [CONCERN: topic] -- a performance concern needing attention
 - [QUESTION: role] -- ask another specialist for context
+- [CONTINUE] -- when you've finished one step but have more to do (e.g., analyzed hotspots, now benchmarking). Describe the next step.
 - [COMPLETE] -- your analysis is finished
 
 ## Rules
