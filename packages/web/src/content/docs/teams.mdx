@@ -45,11 +45,34 @@ Team sessions integrate with the TUI sidebar and session navigation.
 
 ---
 
+### See the Team panel
+
+When a team is active, a dedicated "Team" section appears in the TUI sidebar on your parent session. It shows a phase pipeline with status indicators and a live agent roster.
+
+Each agent displays a color-coded status dot, role name, status label, step count, token count, current task, and sub-step detail.
+
+```txt frame="none"
+▼ Team design
+   ✓ understanding
+   ● design
+   ○ implementation
+   ○ verification
+  Agents
+   • architect working 2s 8.3k
+     Design system architecture
+   • developer idle
+   • qa idle
+```
+
+This is the richest way to monitor team progress. Phase indicators use `✓` for completed, `●` for in-progress, and `○` for pending.
+
+---
+
 ### Track TODOs
 
-The orchestrator writes live progress to the TODO sidebar on your parent session. Phase progress appears as high-priority items, agent tasks as medium-priority items, and individual sub-steps as low-priority items.
+The orchestrator also writes live progress to the TODO sidebar on your parent session. Phase progress appears as high-priority items, agent tasks as medium-priority items, and individual sub-steps as low-priority items.
 
-As phases complete and agents finish their work, items update in real time.
+The Team panel above provides richer visualization, but TODOs still work and update in real time as phases complete and agents finish their work.
 
 ```txt frame="none"
  Todo
@@ -123,7 +146,7 @@ src/team/
 ├── review.ts             Review thread CRUD
 ├── review-loop.ts        Critique → revision cycle (max 3 rounds)
 ├── roles.ts              9 built-in role templates + signal matching
-├── hooks.ts              14 bus events for plugins
+├── hooks.ts              15 bus events for plugins
 ├── sharing/
 │   ├── strategy.ts       SharingStrategy interface + resolve()
 │   ├── selective.ts      Default: filtered context per agent
@@ -571,7 +594,7 @@ A `waiting` or `idle` agent with no active reviews will be flagged for retiremen
 
 ## Listen to events
 
-Teams emit 14 events through the bus system. Subscribe to these in plugins.
+Teams emit 15 events through the bus system. Subscribe to these in plugins.
 
 ---
 
@@ -588,6 +611,7 @@ Teams emit 14 events through the bus system. Subscribe to these in plugins.
 - `team.phase_changed` — phase transition (payload: `{ teamSessionID, phase }`)
 - `team.decision` — decision recorded (payload: `{ teamSessionID, decision: Workspace.Decision }`)
 - `team.escalated` — question escalated to user (payload: `{ teamSessionID, question }`)
+- `team.progress` — structured progress snapshot (payload: `{ teamSessionID, parentSessionID, goal, phase, phases[], agents[] }`)
 
 **Agent lifecycle:**
 
@@ -735,7 +759,7 @@ If the team needs your input, you'll see a question prompt in the TUI.
 
 ## Run the tests
 
-The module has 473 tests across 14 files.
+The module has 488 tests across 14 files.
 
 ```bash frame="none"
 bun test test/team/
@@ -749,26 +773,28 @@ Run from the `packages/opencode` directory. Tests cannot be run from the repo ro
 
 ### Know what's covered
 
-| Test file                    | Area               | What it tests                                                                                                                                                      |
-| ---------------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `team-db`                    | Database           | End-to-end CRUD for workspace, messages, and reviews against real SQLite                                                                                           |
-| `schema-comprehensive`       | Schema             | All 5 tables: insert, read back, enum values, FK cascades, JSON columns                                                                                            |
-| `workspace-comprehensive`    | Workspace          | Create, get/set/append/remove (updatedBy), decisions, questions, answers, summary, concurrent appends, atomic merge                                                |
-| `roster-comprehensive`       | Agent lifecycle    | Spawn (parentSessionID + bus event), retire, setStatus, atomic incrementSteps/Tokens, shouldRetire (all statuses), concurrent increments                           |
-| `message-comprehensive`      | Messages           | Send, recent, forRole (default limit), byType, bus event emission, all 10 types                                                                                    |
-| `review-comprehensive`       | Reviews            | Create, approve, escalate (incl. nonexistent), incrementRound, critique/revision, history, event non-emission                                                      |
-| `review-loop-comprehensive`  | Review loop        | extractRevised with `[ARTIFACT]` tags, fallback, `## Revision Summary`                                                                                             |
-| `roles-comprehensive`        | Roles              | All 9 templates, get/list/register (visibility in list + match), signal matching, scoring                                                                          |
-| `execute-comprehensive`      | Execution          | parseOutput (all 9 tags incl. `[CONTINUE]` + edge cases), buildContext, buildMessage, buildContinueMessage, mergeResults, extractAssistantText, summarizeToolCalls |
-| `orchestrator-comprehensive` | Orchestrator       | parseAction (all 12 types incl. `parallel_assign` + edge cases), extractText, forceAdvance, phase validation, TODO sync with sub-steps                             |
-| `sharing-comprehensive`      | Sharing strategies | All 3 strategies: buildContext, propagate (incl. unsupported ops), summarize, resolve, empty section filtering                                                     |
-| `hooks-comprehensive`        | Events             | All 14 events mapped to correct BusEvent definitions                                                                                                               |
-| `team-index-comprehensive`   | Team namespace     | create (all strategies), get, cancel (+ Updated event), status (modifiedFiles/commandsRun/edge cases), schemas, events                                             |
-| `integration`                | Integration        | Real import chain validation, lazy `await import()`, Team.start() entry point, strategy resolve, Roster.spawn with sessions                                        |
+| Test file                    | Area               | What it tests                                                                                                                                                                                                             |
+| ---------------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `team-db`                    | Database           | End-to-end CRUD for workspace, messages, and reviews against real SQLite                                                                                                                                                  |
+| `schema-comprehensive`       | Schema             | All 5 tables: insert, read back, enum values, FK cascades, JSON columns                                                                                                                                                   |
+| `workspace-comprehensive`    | Workspace          | Create, get/set/append/remove (updatedBy), decisions, questions, answers, summary, concurrent appends, atomic merge, concurrent removes, concurrent answerQuestion, merge non-existent, merge event emission              |
+| `roster-comprehensive`       | Agent lifecycle    | Spawn (parentSessionID + bus event), retire, setStatus, atomic incrementSteps/Tokens, shouldRetire (all statuses), concurrent increments                                                                                  |
+| `message-comprehensive`      | Messages           | Send, recent, forRole (default limit), byType, bus event emission, all 10 types                                                                                                                                           |
+| `review-comprehensive`       | Reviews            | Create, approve, escalate (incl. nonexistent), incrementRound, critique/revision, history, event non-emission                                                                                                             |
+| `review-loop-comprehensive`  | Review loop        | extractRevised with `[ARTIFACT]` tags, fallback, `## Revision Summary`                                                                                                                                                    |
+| `roles-comprehensive`        | Roles              | All 9 templates, get/list/register (visibility in list + match), signal matching, scoring                                                                                                                                 |
+| `execute-comprehensive`      | Execution          | parseOutput (all 9 tags incl. `[CONTINUE]` + edge cases), buildContext, buildMessage, buildContinueMessage, mergeResults, extractAssistantText, summarizeToolCalls                                                        |
+| `orchestrator-comprehensive` | Orchestrator       | parseAction (all 12 types incl. `parallel_assign` + edge cases), extractText, forceAdvance, phase validation, TODO sync with sub-steps, parallel_assign schema edge cases (invalid structure, missing task, missing role) |
+| `sharing-comprehensive`      | Sharing strategies | All 3 strategies: buildContext, propagate (incl. unsupported ops), summarize, resolve, empty section filtering                                                                                                            |
+| `hooks-comprehensive`        | Events             | All 15 events mapped to correct BusEvent definitions                                                                                                                                                                      |
+| `team-index-comprehensive`   | Team namespace     | create (all strategies), get, cancel (+ Updated event), status (modifiedFiles/commandsRun/edge cases), schemas, events                                                                                                    |
+| `integration`                | Integration        | Real import chain validation, lazy `await import()`, Team.start() entry point, strategy resolve, Roster.spawn with sessions                                                                                               |
 
 ---
 
 ### Know what's not tested
+
+The TUI sidebar rendering of team progress (the Team panel) is not unit-tested — it's a UI component that reads from bus events.
 
 Functions that call `SessionPrompt.prompt()` need a real LLM provider and can't be unit tested. These are:
 

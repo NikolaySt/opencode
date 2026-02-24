@@ -26,6 +26,7 @@ export const TeamEvents = {
   "team.phase_changed": Orchestrator.Event.PhaseChanged,
   "team.decision": Orchestrator.Event.Decision,
   "team.escalated": Orchestrator.Event.Escalated,
+  "team.progress": Orchestrator.Event.Progress,
 
   // Agent lifecycle
   "team.agent.spawned": Roster.Event.Spawned,

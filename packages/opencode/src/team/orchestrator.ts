@@ -28,10 +28,43 @@ export namespace Orchestrator {
     complete: 0,
   }
 
+  export const AgentProgress = z.object({
+    role: z.string(),
+    task: z.string(),
+    status: z.enum(["idle", "working", "waiting", "retired", "done"]),
+    stepsUsed: z.number(),
+    tokensConsumed: z.number(),
+    subSteps: z
+      .array(
+        z.object({
+          description: z.string(),
+          done: z.boolean(),
+        }),
+      )
+      .optional(),
+  })
+  export type AgentProgress = z.infer<typeof AgentProgress>
+
+  export const TeamProgress = z.object({
+    teamSessionID: z.string(),
+    parentSessionID: z.string(),
+    goal: z.string(),
+    phase: Phase,
+    phases: z.array(
+      z.object({
+        name: Phase,
+        status: z.enum(["completed", "in_progress", "pending"]),
+      }),
+    ),
+    agents: z.array(AgentProgress),
+  })
+  export type TeamProgress = z.infer<typeof TeamProgress>
+
   export const Event = {
     PhaseChanged: BusEvent.define("team.phase_changed", z.object({ teamSessionID: z.string(), phase: Phase })),
     Decision: BusEvent.define("team.decision", z.object({ teamSessionID: z.string(), decision: Workspace.Decision })),
     Escalated: BusEvent.define("team.escalated", z.object({ teamSessionID: z.string(), question: z.string() })),
+    Progress: BusEvent.define("team.progress", TeamProgress),
   }
 
   // Structured action types from the orchestrator LLM
@@ -150,26 +183,42 @@ export namespace Orchestrator {
     subSteps?: Array<{ description: string; done: boolean }>
   }
 
-  function syncTodos(parentSessionID: string | undefined, phase: Phase, tasks: TaskEntry[]) {
+  function syncTodos(
+    parentSessionID: string | undefined,
+    teamSessionID: string,
+    goal: string,
+    phase: Phase,
+    tasks: TaskEntry[],
+  ) {
     if (!parentSessionID) return
 
     const todos: Todo.Info[] = []
 
     // Phase progress
+    const phases: TeamProgress["phases"] = []
     for (const p of PHASE_ORDER) {
       if (p === "complete") continue
       const idx = PHASE_ORDER.indexOf(p)
       const current = PHASE_ORDER.indexOf(phase)
-      const status = idx < current ? "completed" : idx === current ? "in_progress" : "pending"
-      todos.push({
-        content: `Phase: ${p}`,
-        status,
-        priority: "high",
-      })
+      const status: "completed" | "in_progress" | "pending" =
+        idx < current ? "completed" : idx === current ? "in_progress" : "pending"
+      todos.push({ content: `Phase: ${p}`, status, priority: "high" })
+      phases.push({ name: p, status })
     }
 
-    // Agent tasks with sub-step detail
+    // Build agent progress from roster + tasks
+    const roster = Roster.list(teamSessionID)
+    const agents: AgentProgress[] = []
     for (const t of tasks) {
+      const agent = roster.find((a) => a.role === t.role)
+      agents.push({
+        role: t.role,
+        task: t.task,
+        status: t.done ? "done" : (agent?.status ?? "working"),
+        stepsUsed: agent?.stepsUsed ?? 0,
+        tokensConsumed: agent?.tokensConsumed ?? 0,
+        subSteps: t.subSteps,
+      })
       todos.push({
         content: `[${t.role}] ${t.task.slice(0, 80)}`,
         status: t.done ? "completed" : "in_progress",
@@ -186,7 +235,28 @@ export namespace Orchestrator {
       }
     }
 
+    // Include roster members not currently in a task (idle agents)
+    for (const agent of roster) {
+      if (!tasks.some((t) => t.role === agent.role)) {
+        agents.push({
+          role: agent.role,
+          task: "",
+          status: agent.status === "retired" ? "retired" : "idle",
+          stepsUsed: agent.stepsUsed,
+          tokensConsumed: agent.tokensConsumed,
+        })
+      }
+    }
+
     Todo.update({ sessionID: parentSessionID, todos })
+    Bus.publish(Event.Progress, {
+      teamSessionID,
+      parentSessionID,
+      goal,
+      phase,
+      phases,
+      agents,
+    })
   }
 
   export function forceAdvance(current: Phase): Phase | undefined {
@@ -351,7 +421,7 @@ export namespace Orchestrator {
 
     if (!work.length) return
 
-    syncTodos(input.parentSessionID, phase, agentTasks)
+    syncTodos(input.parentSessionID, input.teamSessionID, input.goal, phase, agentTasks)
 
     log.info("running agents in parallel", {
       roles: work.map((w) => w.agent.role),
@@ -371,7 +441,7 @@ export namespace Orchestrator {
             if (!entry.subSteps) entry.subSteps = []
             entry.subSteps.push({ description: step.description, done: false })
             for (let i = 0; i < entry.subSteps.length - 1; i++) entry.subSteps[i].done = true
-            syncTodos(input.parentSessionID, phase, agentTasks)
+            syncTodos(input.parentSessionID, input.teamSessionID, input.goal, phase, agentTasks)
           },
         )
         await processAgentResult(input.teamSessionID, agent, multiResult.merged)
@@ -395,7 +465,7 @@ export namespace Orchestrator {
       }
     }
 
-    syncTodos(input.parentSessionID, phase, agentTasks)
+    syncTodos(input.parentSessionID, input.teamSessionID, input.goal, phase, agentTasks)
   }
 
   export async function run(input: {
@@ -419,7 +489,7 @@ export namespace Orchestrator {
     log.info("starting orchestrator loop", { teamSessionID: input.teamSessionID, goal: input.goal })
 
     // Initial TODO state
-    syncTodos(input.parentSessionID, phase, agentTasks)
+    syncTodos(input.parentSessionID, input.teamSessionID, input.goal, phase, agentTasks)
 
     while (phase !== "complete" && totalSteps < maxTotalSteps) {
       if (input.abort?.aborted) break
@@ -522,7 +592,7 @@ export namespace Orchestrator {
             })
             agentTasks.push({ role: spec.role, task: spec.task, done: false })
           }
-          syncTodos(input.parentSessionID, phase, agentTasks)
+          syncTodos(input.parentSessionID, input.teamSessionID, input.goal, phase, agentTasks)
 
           // Run initial tasks in parallel
           const assignments = action.roles.map((spec) => ({ role: spec.role, task: spec.task }))
@@ -538,7 +608,7 @@ export namespace Orchestrator {
           }
           const assignEntry: TaskEntry = { role: action.role, task: action.task, done: false }
           agentTasks.push(assignEntry)
-          syncTodos(input.parentSessionID, phase, agentTasks)
+          syncTodos(input.parentSessionID, input.teamSessionID, input.goal, phase, agentTasks)
           const multiResult = await Execute.runMultiStep(
             agent,
             action.task,
@@ -550,13 +620,13 @@ export namespace Orchestrator {
               if (!assignEntry.subSteps) assignEntry.subSteps = []
               assignEntry.subSteps.push({ description: step.description, done: false })
               for (let i = 0; i < assignEntry.subSteps.length - 1; i++) assignEntry.subSteps[i].done = true
-              syncTodos(input.parentSessionID, phase, agentTasks)
+              syncTodos(input.parentSessionID, input.teamSessionID, input.goal, phase, agentTasks)
             },
           )
           await processAgentResult(input.teamSessionID, agent, multiResult.merged)
           assignEntry.done = true
           if (assignEntry.subSteps) for (const s of assignEntry.subSteps) s.done = true
-          syncTodos(input.parentSessionID, phase, agentTasks)
+          syncTodos(input.parentSessionID, input.teamSessionID, input.goal, phase, agentTasks)
           break
         }
 
@@ -599,7 +669,7 @@ export namespace Orchestrator {
             const routeTask = `Answer question from ${action.from}: ${action.question}`
             const routeEntry: TaskEntry = { role: action.to, task: routeTask.slice(0, 80), done: false }
             agentTasks.push(routeEntry)
-            syncTodos(input.parentSessionID, phase, agentTasks)
+            syncTodos(input.parentSessionID, input.teamSessionID, input.goal, phase, agentTasks)
             const multiResult = await Execute.runMultiStep(
               target,
               routeTask,
@@ -611,13 +681,13 @@ export namespace Orchestrator {
                 if (!routeEntry.subSteps) routeEntry.subSteps = []
                 routeEntry.subSteps.push({ description: step.description, done: false })
                 for (let i = 0; i < routeEntry.subSteps.length - 1; i++) routeEntry.subSteps[i].done = true
-                syncTodos(input.parentSessionID, phase, agentTasks)
+                syncTodos(input.parentSessionID, input.teamSessionID, input.goal, phase, agentTasks)
               },
             )
             await processAgentResult(input.teamSessionID, target, multiResult.merged)
             routeEntry.done = true
             if (routeEntry.subSteps) for (const s of routeEntry.subSteps) s.done = true
-            syncTodos(input.parentSessionID, phase, agentTasks)
+            syncTodos(input.parentSessionID, input.teamSessionID, input.goal, phase, agentTasks)
           }
           break
         }
@@ -658,7 +728,7 @@ export namespace Orchestrator {
             type: "status",
             content: `Phase advanced to ${phase}: ${action.summary}`,
           })
-          syncTodos(input.parentSessionID, phase, agentTasks)
+          syncTodos(input.parentSessionID, input.teamSessionID, input.goal, phase, agentTasks)
           break
         }
 
@@ -715,7 +785,7 @@ export namespace Orchestrator {
           })
           // Mark all tasks and phases done
           for (const t of agentTasks) t.done = true
-          syncTodos(input.parentSessionID, phase, agentTasks)
+          syncTodos(input.parentSessionID, input.teamSessionID, input.goal, phase, agentTasks)
           break
         }
 

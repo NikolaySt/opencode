@@ -8,9 +8,9 @@ import { Workspace } from "../../src/team/workspace"
 import { Review } from "../../src/team/review"
 
 describe("team.hooks.TeamEvents", () => {
-  test("exports all 14 expected events", () => {
+  test("exports all 15 expected events", () => {
     const keys = Object.keys(TeamEvents)
-    expect(keys).toHaveLength(14)
+    expect(keys).toHaveLength(15)
   })
 
   test("all events have type and properties fields", () => {
@@ -20,6 +20,7 @@ describe("team.hooks.TeamEvents", () => {
     expect(TeamEvents["team.phase_changed"]).toBe(Orchestrator.Event.PhaseChanged)
     expect(TeamEvents["team.decision"]).toBe(Orchestrator.Event.Decision)
     expect(TeamEvents["team.escalated"]).toBe(Orchestrator.Event.Escalated)
+    expect(TeamEvents["team.progress"]).toBe(Orchestrator.Event.Progress)
     expect(TeamEvents["team.agent.spawned"]).toBe(Roster.Event.Spawned)
     expect(TeamEvents["team.agent.retired"]).toBe(Roster.Event.Retired)
     expect(TeamEvents["team.agent.updated"]).toBe(Roster.Event.Updated)
@@ -32,7 +33,7 @@ describe("team.hooks.TeamEvents", () => {
 })
 
 describe("team.hooks.TeamEventName type", () => {
-  test("all 14 keys are valid TeamEventName values", () => {
+  test("all 15 keys are valid TeamEventName values", () => {
     const keys = Object.keys(TeamEvents) as TeamEventName[]
     const expected: TeamEventName[] = [
       "team.created",
@@ -41,6 +42,7 @@ describe("team.hooks.TeamEventName type", () => {
       "team.phase_changed",
       "team.decision",
       "team.escalated",
+      "team.progress",
       "team.agent.spawned",
       "team.agent.retired",
       "team.agent.updated",
@@ -50,7 +52,7 @@ describe("team.hooks.TeamEventName type", () => {
       "team.review.completed",
       "team.review.escalated",
     ]
-    expect(keys).toHaveLength(14)
+    expect(keys).toHaveLength(15)
     for (const name of expected) {
       expect(keys).toContain(name)
     }

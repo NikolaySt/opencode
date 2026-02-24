@@ -19,12 +19,14 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
   const diff = createMemo(() => sync.data.session_diff[props.sessionID] ?? [])
   const todo = createMemo(() => sync.data.todo[props.sessionID] ?? [])
   const messages = createMemo(() => sync.data.message[props.sessionID] ?? [])
+  const team = createMemo(() => sync.data.team[props.sessionID])
 
   const [expanded, setExpanded] = createStore({
     mcp: true,
     diff: true,
     todo: true,
     lsp: true,
+    team: true,
   })
 
   // Sort MCP servers alphabetically for consistent display order
@@ -226,6 +228,113 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
                 </box>
                 <Show when={todo().length <= 2 || expanded.todo}>
                   <For each={todo()}>{(todo) => <TodoItem status={todo.status} content={todo.content} />}</For>
+                </Show>
+              </box>
+            </Show>
+            <Show when={team()}>
+              <box>
+                <box flexDirection="row" gap={1} onMouseDown={() => setExpanded("team", !expanded.team)}>
+                  <text fg={theme.text}>{expanded.team ? "▼" : "▶"}</text>
+                  <text fg={theme.text}>
+                    <b>Team</b> <span style={{ fg: theme.textMuted }}>{team()!.phase}</span>
+                  </text>
+                </box>
+                <Show when={expanded.team}>
+                  <box paddingLeft={1}>
+                    <For each={team()!.phases}>
+                      {(p) => (
+                        <box flexDirection="row" gap={0}>
+                          <text
+                            flexShrink={0}
+                            style={{
+                              fg:
+                                p.status === "completed"
+                                  ? theme.success
+                                  : p.status === "in_progress"
+                                    ? theme.warning
+                                    : theme.textMuted,
+                            }}
+                          >
+                            {p.status === "completed" ? "✓" : p.status === "in_progress" ? "●" : "○"}{" "}
+                          </text>
+                          <text
+                            style={{
+                              fg:
+                                p.status === "in_progress"
+                                  ? theme.warning
+                                  : p.status === "completed"
+                                    ? theme.textMuted
+                                    : theme.textMuted,
+                            }}
+                          >
+                            {p.name}
+                          </text>
+                        </box>
+                      )}
+                    </For>
+                  </box>
+                  <Show when={team()!.agents.length > 0}>
+                    <text fg={theme.textMuted} paddingTop={1}>
+                      Agents
+                    </text>
+                    <box paddingLeft={1}>
+                      <For each={team()!.agents}>
+                        {(agent) => (
+                          <box>
+                            <box flexDirection="row" gap={1}>
+                              <text
+                                flexShrink={0}
+                                style={{
+                                  fg:
+                                    agent.status === "working"
+                                      ? theme.warning
+                                      : agent.status === "done"
+                                        ? theme.success
+                                        : agent.status === "retired"
+                                          ? theme.error
+                                          : theme.textMuted,
+                                }}
+                              >
+                                •
+                              </text>
+                              <text fg={theme.text} wrapMode="word">
+                                {agent.role}{" "}
+                                <span style={{ fg: theme.textMuted }}>
+                                  {agent.status === "done" ? "done" : agent.status}
+                                  {agent.stepsUsed > 0 ? ` ${agent.stepsUsed}s` : ""}
+                                  {agent.tokensConsumed > 0 ? ` ${(agent.tokensConsumed / 1000).toFixed(1)}k` : ""}
+                                </span>
+                              </text>
+                            </box>
+                            <Show when={agent.task}>
+                              <text fg={theme.textMuted} paddingLeft={2} wrapMode="word">
+                                {agent.task.slice(0, 60)}
+                              </text>
+                            </Show>
+                            <Show when={agent.subSteps && agent.subSteps.length > 0}>
+                              <For each={agent.subSteps}>
+                                {(step) => (
+                                  <box flexDirection="row" gap={0} paddingLeft={2}>
+                                    <text
+                                      flexShrink={0}
+                                      style={{
+                                        fg: step.done ? theme.success : theme.warning,
+                                      }}
+                                    >
+                                      {step.done ? "✓" : "•"}{" "}
+                                    </text>
+                                    <text fg={theme.textMuted} wrapMode="word">
+                                      {step.description.slice(0, 50)}
+                                    </text>
+                                  </box>
+                                )}
+                              </For>
+                            </Show>
+                          </box>
+                        )}
+                      </For>
+                    </box>
+                  </Show>
                 </Show>
               </box>
             </Show>

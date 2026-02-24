@@ -73,6 +73,22 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
       formatter: FormatterStatus[]
       vcs: VcsInfo | undefined
       path: Path
+      team: {
+        [sessionID: string]: {
+          teamSessionID: string
+          goal: string
+          phase: string
+          phases: Array<{ name: string; status: "completed" | "in_progress" | "pending" }>
+          agents: Array<{
+            role: string
+            task: string
+            status: "idle" | "working" | "waiting" | "retired" | "done"
+            stepsUsed: number
+            tokensConsumed: number
+            subSteps?: Array<{ description: string; done: boolean }>
+          }>
+        }
+      }
     }>({
       provider_next: {
         all: [],
@@ -100,12 +116,54 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
       formatter: [],
       vcs: undefined,
       path: { state: "", config: "", worktree: "", directory: "" },
+      team: {},
     })
 
     const sdk = useSDK()
 
     sdk.event.listen((e) => {
       const event = e.details
+      // Handle team events before typed switch (team events not yet in SDK types)
+      const raw = event as { type: string; properties: Record<string, unknown> }
+      if (raw.type === "team.progress") {
+        const p = raw.properties as {
+          teamSessionID: string
+          parentSessionID: string
+          goal: string
+          phase: string
+          phases: Array<{ name: string; status: "completed" | "in_progress" | "pending" }>
+          agents: Array<{
+            role: string
+            task: string
+            status: "idle" | "working" | "waiting" | "retired" | "done"
+            stepsUsed: number
+            tokensConsumed: number
+            subSteps?: Array<{ description: string; done: boolean }>
+          }>
+        }
+        setStore("team", p.parentSessionID, {
+          teamSessionID: p.teamSessionID,
+          goal: p.goal,
+          phase: p.phase,
+          phases: p.phases,
+          agents: p.agents,
+        })
+        return
+      }
+      if (raw.type === "team.completed") {
+        for (const [sid, t] of Object.entries(store.team)) {
+          if (t.teamSessionID === (raw.properties.info as { id: string })?.id) {
+            setStore(
+              "team",
+              produce((draft) => {
+                delete draft[sid]
+              }),
+            )
+            break
+          }
+        }
+        return
+      }
       switch (event.type) {
         case "server.instance.disposed":
           bootstrap()
