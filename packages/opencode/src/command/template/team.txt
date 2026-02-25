@@ -4,4 +4,4 @@ The task is: $ARGUMENTS
 
 Use the `team` tool now with the goal set to the task above. Do not attempt to do the work yourself — the team tool will handle everything by staffing specialists, assigning work, triggering reviews, and converging on a result.
 
-After the team tool returns, summarize the results for the user.
+After the team tool returns, provide a brief summary of what the team accomplished and STOP. Do NOT use any other tools after the team tool completes. Do NOT read files, run commands, write code, or do any additional work. The team already handled everything. Just summarize and stop.

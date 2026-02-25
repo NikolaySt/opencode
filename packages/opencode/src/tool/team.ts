@@ -21,11 +21,14 @@ export const TeamTool = Tool.define("team", {
     const activities: Team.Activity[] = []
     const maxActivities = 50
 
+    let currentPhase = "understanding"
+
     function pushMetadata() {
       ctx.metadata({
         title: activities.at(-1)?.message ?? `Team: ${params.goal.slice(0, 60)}`,
         metadata: {
           goal: params.goal,
+          phase: currentPhase,
           sharingStrategy: params.sharing_strategy ?? "selective",
           activities: activities.slice(-maxActivities),
         },
@@ -36,6 +39,7 @@ export const TeamTool = Tool.define("team", {
       title: `Team: ${params.goal.slice(0, 60)}`,
       metadata: {
         goal: params.goal,
+        phase: currentPhase,
         sharingStrategy: params.sharing_strategy ?? "selective",
         activities: [],
       },
@@ -61,10 +65,18 @@ export const TeamTool = Tool.define("team", {
         return answers[0]?.[0] ?? "No answer provided"
       },
       onStatus: (message) => {
+        // Extract phase from "Phase: X" messages
+        const match = message.match(/^Phase:\s*(\w+)/)
+        if (match) currentPhase = match[1]
         pushMetadata()
       },
       onActivity: (entry) => {
         activities.push(entry)
+        // Track phase from advance activities (e.g., "Advancing to design: ...")
+        if (entry.type === "advance") {
+          const match = entry.message.match(/(?:Advancing to|Starting phase:)\s*(\w+)/)
+          if (match) currentPhase = match[1]
+        }
         pushMetadata()
       },
     })

@@ -12,3 +12,5 @@ The team runs autonomously through five phases: understanding → design → imp
 If the team gets stuck on a decision that requires user input, it will escalate and prompt the user directly.
 
 IMPORTANT: This tool runs a long-lived orchestration loop. It may take several minutes to complete depending on task complexity.
+
+IMPORTANT: After this tool completes, you MUST only summarize the results. Do NOT call any other tools — no file reads, no bash commands, no edits. The team already did all the work. Just present the summary to the user and stop.

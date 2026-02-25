@@ -493,6 +493,116 @@ describe("team.execute.buildMessage", () => {
     expect(msg).not.toContain("## Questions Routed to You")
     expect(msg).not.toContain("## Recent Team Communication")
   })
+
+  test("includes understanding phase constraints", () => {
+    const context: Execute.AgentContext = {
+      workspaceSummary: "Summary",
+      relevantMessages: [],
+      decisions: [],
+      openQuestions: [],
+    }
+    const agent: Roster.Info = {
+      id: "agt_1",
+      teamSessionID: "team_1",
+      role: "architect",
+      prompt: "You are an architect",
+      expertise: ["design"],
+      workspaceRead: ["goal"],
+      workspaceWrite: ["artifacts"],
+      relationships: { collaborates_with: [], reviews: [], reviewed_by: [] },
+      status: "idle",
+      stepsUsed: 0,
+      tokensConsumed: 0,
+      time: { created: 0, updated: 0 },
+    }
+
+    const msg = Execute.buildMessage("Analyze the codebase", context, agent, "goal", "understanding")
+    expect(msg).toContain("Phase Constraints: Understanding")
+    expect(msg).toContain("ANALYZE and EXPLORE only")
+    expect(msg).toContain("DO NOT create, write, or edit any files")
+  })
+
+  test("includes implementation phase constraints", () => {
+    const context: Execute.AgentContext = {
+      workspaceSummary: "Summary",
+      relevantMessages: [],
+      decisions: [],
+      openQuestions: [],
+    }
+    const agent: Roster.Info = {
+      id: "agt_1",
+      teamSessionID: "team_1",
+      role: "developer",
+      prompt: "You are a developer",
+      expertise: ["coding"],
+      workspaceRead: ["goal"],
+      workspaceWrite: ["artifacts"],
+      relationships: { collaborates_with: [], reviews: [], reviewed_by: [] },
+      status: "idle",
+      stepsUsed: 0,
+      tokensConsumed: 0,
+      time: { created: 0, updated: 0 },
+    }
+
+    const msg = Execute.buildMessage("Implement login", context, agent, "goal", "implementation")
+    expect(msg).toContain("Phase Constraints: Implementation")
+    expect(msg).toContain("Write code and build the solution")
+  })
+
+  test("includes design phase constraints with no-code restriction", () => {
+    const context: Execute.AgentContext = {
+      workspaceSummary: "Summary",
+      relevantMessages: [],
+      decisions: [],
+      openQuestions: [],
+    }
+    const agent: Roster.Info = {
+      id: "agt_1",
+      teamSessionID: "team_1",
+      role: "architect",
+      prompt: "You are an architect",
+      expertise: ["design"],
+      workspaceRead: ["goal"],
+      workspaceWrite: ["artifacts"],
+      relationships: { collaborates_with: [], reviews: [], reviewed_by: [] },
+      status: "idle",
+      stepsUsed: 0,
+      tokensConsumed: 0,
+      time: { created: 0, updated: 0 },
+    }
+
+    const msg = Execute.buildMessage("Design the auth flow", context, agent, "goal", "design")
+    expect(msg).toContain("Phase Constraints: Design")
+    expect(msg).toContain("DESIGN and PLAN only")
+    expect(msg).toContain("DO NOT create implementation files")
+  })
+
+  test("includes verification phase constraints", () => {
+    const context: Execute.AgentContext = {
+      workspaceSummary: "Summary",
+      relevantMessages: [],
+      decisions: [],
+      openQuestions: [],
+    }
+    const agent: Roster.Info = {
+      id: "agt_1",
+      teamSessionID: "team_1",
+      role: "qa",
+      prompt: "You are a QA",
+      expertise: ["testing"],
+      workspaceRead: ["goal"],
+      workspaceWrite: ["artifacts"],
+      relationships: { collaborates_with: [], reviews: [], reviewed_by: [] },
+      status: "idle",
+      stepsUsed: 0,
+      tokensConsumed: 0,
+      time: { created: 0, updated: 0 },
+    }
+
+    const msg = Execute.buildMessage("Verify implementation", context, agent, "goal", "verification")
+    expect(msg).toContain("Phase Constraints: Verification")
+    expect(msg).toContain("DO NOT refactor or add new features")
+  })
 })
 
 describe("team.execute.AgentResult defaults", () => {
@@ -999,6 +1109,31 @@ describe("Execute.buildContinueMessage", () => {
 
         expect(msg).toContain("Use REST API")
         expect(msg).toContain("Decisions (may have been updated)")
+      },
+    })
+  })
+
+  test("includes phase constraints in continuation messages", async () => {
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const teamID = createTeamSession(Instance.project.id)
+        const agentID = insertAgent(teamID, "architect")
+        Workspace.create(teamID, "Analyze project")
+
+        const agent = Roster.getByID(agentID)!
+        const msg = Execute.buildContinueMessage(
+          agent,
+          teamID,
+          "Analyze project",
+          "understanding",
+          "Found existing patterns",
+          1,
+          "Explore more modules",
+        )
+
+        expect(msg).toContain("Phase Constraints: Understanding")
+        expect(msg).toContain("DO NOT create, write, or edit any files")
       },
     })
   })

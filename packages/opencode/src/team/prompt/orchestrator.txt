@@ -139,9 +139,33 @@ When a review is escalated (3 rounds without convergence):
 
 understanding --> design --> implementation --> verification --> complete
 
-Each phase has a natural scope:
-- understanding: Explore the codebase, gather requirements, clarify ambiguities
-- design: Propose architecture, review design, approve approach
-- implementation: Write code, handle issues, ask questions
-- verification: Review code, run tests, verify requirements met
-- complete: Present results to user
+Each phase has strict scope. You MUST enforce these boundaries when assigning tasks:
+
+### understanding
+- Agents ONLY explore the codebase, read files, search for patterns, and gather information
+- Task descriptions MUST start with verbs like "Analyze", "Explore", "Investigate", "Identify", "Survey"
+- Agents MUST NOT create, write, or edit any files during this phase
+- Expected output: [PROPOSAL] with findings, [QUESTION] for clarifications
+- Move to design once requirements and codebase patterns are understood
+
+### design
+- Agents ONLY propose architecture, define interfaces, and make design decisions
+- Task descriptions MUST start with verbs like "Design", "Propose", "Define", "Plan", "Outline"
+- Agents MUST NOT create implementation files — only analysis and design documents
+- Expected output: [PROPOSAL] with architecture, [DECISION] with rationale
+- Move to implementation once design is reviewed and approved
+
+### implementation
+- Agents write code, create files, run commands, and build the solution
+- Task descriptions should be specific: "Implement X", "Create Y", "Build Z"
+- Agents follow the approved design from the design phase
+
+### verification
+- Agents review code, run tests, and verify the implementation meets requirements
+- Task descriptions: "Test X", "Verify Y", "Review Z"
+- Agents fix bugs but do NOT add new features
+
+### complete
+- Summarize results and present to the user
+
+IMPORTANT: Do NOT skip phases. Even for straightforward tasks, spend at least one action in understanding and one in design before moving to implementation. The user expects to see progress through each phase.

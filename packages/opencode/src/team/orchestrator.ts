@@ -430,6 +430,10 @@ export namespace Orchestrator {
 
     const results = await Promise.allSettled(
       work.map(async ({ agent, entry, task }) => {
+        // Mark entry as in-progress and sync immediately so UI shows "working"
+        entry.task = task
+        syncTodos(input.parentSessionID, input.teamSessionID, input.goal, phase, agentTasks)
+
         const multiResult = await Execute.runMultiStep(
           agent,
           task,
@@ -447,6 +451,8 @@ export namespace Orchestrator {
         await processAgentResult(input.teamSessionID, agent, multiResult.merged)
         entry.done = true
         if (entry.subSteps) for (const s of entry.subSteps) s.done = true
+        // Sync immediately after each agent completes so UI updates per-agent
+        syncTodos(input.parentSessionID, input.teamSessionID, input.goal, phase, agentTasks)
         return { role: agent.role, result: multiResult }
       }),
     )
@@ -602,6 +608,7 @@ export namespace Orchestrator {
             agentTasks.push({ role: spec.role, task: spec.task, done: false })
             activity("spawn", `Spawned ${spec.role}`, spec.role)
           }
+          // Sync after all agents spawned so UI shows the full roster before execution starts
           syncTodos(input.parentSessionID, input.teamSessionID, input.goal, phase, agentTasks)
 
           // Run initial tasks in parallel
@@ -624,6 +631,8 @@ export namespace Orchestrator {
           const assignEntry: TaskEntry = { role: action.role, task: action.task, done: false }
           agentTasks.push(assignEntry)
           syncTodos(input.parentSessionID, input.teamSessionID, input.goal, phase, agentTasks)
+          // Sync again once agent is marked working so UI shows active status
+          activity("agent_step", `${action.role} starting work...`, action.role)
           const multiResult = await Execute.runMultiStep(
             agent,
             action.task,

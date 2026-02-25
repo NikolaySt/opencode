@@ -72,6 +72,42 @@ export namespace Execute {
     }
   }
 
+  const PHASE_CONSTRAINTS: Record<string, string> = {
+    understanding: [
+      "## Phase Constraints: Understanding",
+      "You are in the UNDERSTANDING phase. Your job is to ANALYZE and EXPLORE only.",
+      "- DO read files, search the codebase, and gather information",
+      "- DO identify existing patterns, conventions, and architecture",
+      "- DO NOT create, write, or edit any files",
+      "- DO NOT run build commands or modify anything",
+      "- Output your findings using [PROPOSAL] tags and [QUESTION] tags",
+      "- Use [CONTINUE] if you need more exploration steps",
+    ].join("\n"),
+    design: [
+      "## Phase Constraints: Design",
+      "You are in the DESIGN phase. Your job is to DESIGN and PLAN only.",
+      "- DO read files to inform your design decisions",
+      "- DO propose architecture, interfaces, and component structure",
+      "- DO NOT create implementation files or write production code",
+      "- You MAY create small proof-of-concept snippets inline in your response",
+      "- Output your designs using [PROPOSAL] tags and decisions as [DECISION] tags",
+    ].join("\n"),
+    implementation: [
+      "## Phase Constraints: Implementation",
+      "You are in the IMPLEMENTATION phase. Write code and build the solution.",
+      "- DO create, edit, and write files",
+      "- DO run commands to verify your work",
+      "- Follow the approved design and decisions from earlier phases",
+    ].join("\n"),
+    verification: [
+      "## Phase Constraints: Verification",
+      "You are in the VERIFICATION phase. Review, test, and validate the implementation.",
+      "- DO read code, run tests, and verify behavior",
+      "- DO fix bugs and issues you discover",
+      "- DO NOT refactor or add new features — only fix problems",
+    ].join("\n"),
+  }
+
   export function buildMessage(
     task: string,
     context: AgentContext,
@@ -85,6 +121,13 @@ export namespace Execute {
     parts.push(`Your role: ${agent.role}`)
     parts.push(`Current phase: ${phase}`)
     parts.push("")
+
+    // Phase-specific constraints
+    const constraints = PHASE_CONSTRAINTS[phase]
+    if (constraints) {
+      parts.push(constraints)
+      parts.push("")
+    }
 
     parts.push("## Workspace Summary")
     parts.push(context.workspaceSummary)
@@ -136,7 +179,9 @@ export namespace Execute {
     strategy: SharingStrategy,
   ): string {
     const context = strategy.buildContext({ agent, teamSessionID, teamGoal, phase })
-    return context + "\n## Your Assignment\n" + task + "\n"
+    const constraints = PHASE_CONSTRAINTS[phase]
+    const constraintBlock = constraints ? "\n" + constraints + "\n" : ""
+    return context + constraintBlock + "\n## Your Assignment\n" + task + "\n"
   }
 
   export async function run(
@@ -418,6 +463,12 @@ export namespace Execute {
     parts.push(`Current phase: ${phase}`)
     parts.push(`This is step ${stepIndex + 1} of your current assignment.`)
     parts.push("")
+
+    const constraints = PHASE_CONSTRAINTS[phase]
+    if (constraints) {
+      parts.push(constraints)
+      parts.push("")
+    }
 
     parts.push("## Updated Workspace Summary")
     parts.push(context.workspaceSummary)
